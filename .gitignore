@@ -1,0 +1,14 @@
+.gradle/
+build/
+local.properties
+.idea/
+exefs/
+romfs/
+main.elf
+*.nsp
+*.xci
+*.nca
+*.nso
+*.keys
+*.keystore
+*.apk

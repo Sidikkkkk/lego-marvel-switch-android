@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -103,7 +104,27 @@ public final class NsoHeaderTest {
         largeImage.position(0x2000);
         require(largeImage.equals(ByteBuffer.wrap(expectedLargeData)), "Staged decoded bytes across the LZ4 history wrap");
         expectError(fixture().put(0x14b, (byte) 0).array(), MODULE_SIZE, 0x2020, "Segmen .data: SHA-256 berbeda");
-        System.out.println("39 NSO checks passed.");
+        require(loaded.report().contains("MOD0 tidak terdeteksi"), "Staged module without a MOD0 header");
+        String metadata = inspectMetadata(dynamicFixture());
+        require(metadata.contains("MOD0 0x2180, .dynamic 0x2000 (13 entri)"), "Signed MOD0 dynamic offset");
+        require(metadata.contains("Dependensi DT_NEEDED  2\n  sdk.nso\n  rtld.nso"), "Dependency string offsets");
+        require(metadata.contains("Relokasi RELA  2 entri"), "RELA table count");
+        require(metadata.contains("Relokasi RELR  2 entri"), "RELR table word count");
+        require(metadata.contains("Relokasi PLT RELA  1 entri"), "PLT format and table count");
+        expectMetadataError(dynamicFixture().putInt(0x384, 0x80), "Rentang .dynamic di luar data segmen");
+        ByteBuffer unterminatedDynamic = dynamicFixture();
+        for (int position = 0x2d0; position < 0x400; position += 16) {
+            if (position != 0x380) {
+                unterminatedDynamic.putLong(position, 0x70000000L);
+            }
+        }
+        expectMetadataError(unterminatedDynamic, "DT_NULL tidak ditemukan");
+        expectMetadataError(dynamicFixture().putInt(0x104, 0x3c).putInt(0x13c, 0x30444f4d),
+                "Header MOD0 terpotong");
+        expectMetadataError(dynamicFixture().putLong(0x228, 0x10bf), "Rentang DT_STRTAB di luar data segmen");
+        expectMetadataError(dynamicFixture().putLong(0x238, 17), "Nama DT_NEEDED tidak diakhiri NUL");
+        expectMetadataError(dynamicFixture().putLong(0x258, 49), "Ukuran tabel relokasi RELA tidak valid");
+        System.out.println("51 NSO checks passed.");
     }
 
     private static ByteBuffer fixture() throws Exception {
@@ -148,6 +169,37 @@ public final class NsoHeaderTest {
         }
         compressed.write(new byte[]{0x50, 'A', 'A', 'A', 'A', 'A'});
         return module(compressed.toByteArray(), decompressed).array();
+    }
+
+    private static ByteBuffer dynamicFixture() {
+        ByteBuffer module = ByteBuffer.allocate(0x400).order(ByteOrder.LITTLE_ENDIAN);
+        module.putInt(0, 0x304f534e);
+        module.putInt(0x10, 0x100).putInt(0x14, 0).putInt(0x18, 0x40);
+        module.putInt(0x20, 0x140).putInt(0x24, 0x1000).putInt(0x28, 0xc0);
+        module.putInt(0x30, 0x200).putInt(0x34, 0x2000).putInt(0x38, 0x200);
+        module.putInt(0x3c, 0x20);
+        module.putInt(0x104, 0x2180);
+        module.putInt(0x380, 0x30444f4d).putInt(0x384, -0x180);
+        byte[] strings = "\0sdk.nso\0rtld.nso\0".getBytes(StandardCharsets.US_ASCII);
+        module.position(0x140).put(strings);
+        module.position(0x200);
+        module.putLong(1).putLong(1).putLong(1).putLong(9); // DT_NEEDED
+        module.putLong(5).putLong(0x1000).putLong(10).putLong(strings.length);
+        module.putLong(7).putLong(0x1040).putLong(8).putLong(48).putLong(9).putLong(24);
+        module.putLong(2).putLong(24).putLong(20).putLong(7).putLong(23).putLong(0x1070);
+        module.putLong(36).putLong(0x1088).putLong(35).putLong(16).putLong(37).putLong(8);
+        module.putLong(0).putLong(0); // DT_NULL
+        return module;
+    }
+
+    private static String inspectMetadata(ByteBuffer module) throws IOException {
+        return NsoHeader.inspect(new ByteArrayInputStream(module.array()), module.capacity(), 0x2220).report();
+    }
+
+    private static void expectMetadataError(ByteBuffer module, String detail) throws IOException {
+        String report = inspectMetadata(module);
+        require(report.contains("Segmen NSO0 berhasil diperiksa")
+                && report.contains("Metadata MOD0 belum bisa dibaca: " + detail), report);
     }
 
     private static void expectError(byte[] bytes, long fileLength, String detail) throws IOException {

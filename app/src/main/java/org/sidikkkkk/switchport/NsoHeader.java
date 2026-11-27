@@ -23,7 +23,7 @@ final class NsoHeader {
     private static final String[] SEGMENT_NAMES = {".text", ".rodata", ".data"};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
-    private record Segment(String name, long fileOffset, long storedSize, long memoryOffset,
+    record Segment(String name, long fileOffset, long storedSize, long memoryOffset,
                            long unpackedSize, boolean compressed, byte[] expectedHash) {
         long memoryEnd() {
             return memoryOffset + unpackedSize;
@@ -121,8 +121,17 @@ final class NsoHeader {
                 .append(")  ").append(memory.rangeEnd).append(" byte\n")
                 .append("Segmen dan .bss  ").append(memory.usedSize).append(" byte\n")
                 .append("Celah dalam rentang  ").append(memory.rangeEnd - memory.usedSize).append(" byte\n");
+        ByteBuffer memoryImage = image == null ? null : ByteBuffer.wrap(image).asReadOnlyBuffer();
         if (image != null) {
             report.append("\nMuat segmen ke buffer RAM berhasil (").append(image.length).append(" byte).\n");
+            report.append('\n');
+            try {
+                report.append(NsoDynamic.describe(memoryImage, segments));
+            } catch (InterruptedIOException error) {
+                throw error;
+            } catch (IOException error) {
+                report.append("Metadata MOD0 belum bisa dibaca: ").append(error.getMessage()).append('\n');
+            }
         } else if (memoryBudget >= 0) {
             report.append("\nMuat ke RAM dilewati. Buffer tidak tersedia dalam batas heap untuk uji ini.\n");
         }
@@ -131,7 +140,6 @@ final class NsoHeader {
         } else {
             report.append("\nUkuran file  ").append(fileLength).append(" byte");
         }
-        ByteBuffer memoryImage = image == null ? null : ByteBuffer.wrap(image).asReadOnlyBuffer();
         return new Inspection(report.toString(), memoryImage);
     }
 

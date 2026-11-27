@@ -73,7 +73,37 @@ public final class NsoHeaderTest {
         byte[] emptyAtEnd = module(new byte[]{0}, new byte[0]).putInt(0x34, 0xfffffff0).array();
         require(NsoHeader.inspect(new ByteArrayInputStream(emptyAtEnd), emptyAtEnd.length)
                 .contains("Rentang dari base [0x0, 0x1020)"), "Empty segment does not enlarge image span");
-        System.out.println("30 NSO checks passed.");
+
+        byte[] forLoad = withBss.clone();
+        Arrays.fill(forLoad, 0x120, 0x140, (byte) 'R');
+        NsoHeader.Inspection loaded = NsoHeader.inspect(new ByteArrayInputStream(forLoad), forLoad.length, 0x2143);
+        ByteBuffer image = loaded.memoryImage();
+        require(image != null && image.remaining() == 0x2143, "Image span fits exact budget");
+        require(loaded.report().contains("Muat segmen ke buffer RAM berhasil (8515 byte)"), "Image load report");
+        require(image.isReadOnly(), "Verified image is read-only");
+        byte[] expectedImage = new byte[0x2143];
+        Arrays.fill(expectedImage, 0, 0x20, (byte) 'T');
+        Arrays.fill(expectedImage, 0x1000, 0x1020, (byte) 'R');
+        byte[] expectedData = "AB".repeat(13).concat("ACDEFG").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        System.arraycopy(expectedData, 0, expectedImage, 0x2000, expectedData.length);
+        require(image.equals(ByteBuffer.wrap(expectedImage)), "Raw and LZ4 data placement, zero BSS and gaps");
+
+        NsoHeader.Inspection skipped = NsoHeader.inspect(new ByteArrayInputStream(forLoad), forLoad.length, 0x2142);
+        require(skipped.memoryImage() == null && skipped.report().contains("Muat ke RAM dilewati")
+                && skipped.report().contains("SHA-256 sesuai header"), "Low budget keeps streaming validation");
+        require(NsoHeader.inspect(new ByteArrayInputStream(endAtLimit), endAtLimit.length, Long.MAX_VALUE)
+                .memoryImage() == null, "Image greater than an int-sized byte buffer is skipped");
+        require(NsoHeader.inspect(new ByteArrayInputStream(emptyAtEnd), emptyAtEnd.length, 0x1020)
+                .memoryImage().remaining() == 0x1020, "Empty segment outside image requires no write view");
+
+        ByteBuffer largeImage = NsoHeader.inspect(new ByteArrayInputStream(wrapsHistory),
+                wrapsHistory.length, 100_000).memoryImage();
+        byte[] expectedLargeData = new byte[70_007];
+        Arrays.fill(expectedLargeData, (byte) 'A');
+        largeImage.position(0x2000);
+        require(largeImage.equals(ByteBuffer.wrap(expectedLargeData)), "Staged decoded bytes across the LZ4 history wrap");
+        expectError(fixture().put(0x14b, (byte) 0).array(), MODULE_SIZE, 0x2020, "Segmen .data: SHA-256 berbeda");
+        System.out.println("39 NSO checks passed.");
     }
 
     private static ByteBuffer fixture() throws Exception {
@@ -121,8 +151,13 @@ public final class NsoHeaderTest {
     }
 
     private static void expectError(byte[] bytes, long fileLength, String detail) throws IOException {
+        expectError(bytes, fileLength, -1, detail);
+    }
+
+    private static void expectError(byte[] bytes, long fileLength, long memoryBudget, String detail)
+            throws IOException {
         try {
-            NsoHeader.inspect(new ByteArrayInputStream(bytes), fileLength);
+            NsoHeader.inspect(new ByteArrayInputStream(bytes), fileLength, memoryBudget);
         } catch (IOException error) {
             require(error.getMessage().contains(detail), error.getMessage());
             return;

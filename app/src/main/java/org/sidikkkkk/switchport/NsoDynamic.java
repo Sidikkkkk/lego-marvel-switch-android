@@ -15,11 +15,14 @@ final class NsoDynamic {
     private static final int RELR_ENTRY_SIZE = 8;
     private static final int DT_NEEDED = 1;
     private static final int DT_PLTRELSZ = 2;
+    private static final int DT_HASH = 4;
     private static final int DT_STRTAB = 5;
+    private static final int DT_SYMTAB = 6;
     private static final int DT_RELA = 7;
     private static final int DT_RELASZ = 8;
     private static final int DT_RELAENT = 9;
     private static final int DT_STRSZ = 10;
+    private static final int DT_SYMENT = 11;
     private static final int DT_REL = 17;
     private static final int DT_RELSZ = 18;
     private static final int DT_RELENT = 19;
@@ -33,7 +36,8 @@ final class NsoDynamic {
 
     private NsoDynamic() {}
 
-    static String describe(ByteBuffer image, NsoHeader.Segment[] segments) throws IOException {
+    static String describe(ByteBuffer image, NsoHeader.Segment[] segments, long symbolOffset, long symbolSize)
+            throws IOException {
         NsoHeader.Segment text = segments[0];
         if (text.unpackedSize() < 8) {
             return "MOD0 tidak terdeteksi pada awalan .text.\n";
@@ -63,7 +67,10 @@ final class NsoDynamic {
                         .append(", .dynamic 0x").append(Long.toHexString(dynamic))
                         .append(" (").append(dynamicCount).append(" entri)\n");
                 appendDependencies(report, data, segments, tags, needed, neededCount);
-                appendRelocations(report, segments, tags);
+                NsoRelocations relocations = new NsoRelocations(data,
+                        symbolTable(data, segments, tags, symbolOffset, symbolSize));
+                appendRelocations(report, segments, tags, relocations);
+                relocations.appendReport(report);
                 return report.toString();
             }
             long value = data.getLong((int) entry + Long.BYTES);
@@ -85,7 +92,7 @@ final class NsoDynamic {
 
     private static boolean isTrackedTag(int tag) {
         return switch (tag) {
-            case DT_STRTAB, DT_STRSZ, DT_RELA, DT_RELASZ, DT_RELAENT, DT_REL, DT_RELSZ,
+            case DT_HASH, DT_STRTAB, DT_STRSZ, DT_SYMTAB, DT_SYMENT, DT_RELA, DT_RELASZ, DT_RELAENT, DT_REL, DT_RELSZ,
                     DT_RELENT, DT_RELR, DT_RELRSZ, DT_RELRENT, DT_JMPREL, DT_PLTRELSZ, DT_PLTREL -> true;
             default -> false;
         };
@@ -113,7 +120,7 @@ final class NsoDynamic {
         }
     }
 
-    private static String readName(ByteBuffer data, long offset, long end) throws IOException {
+    static String readName(ByteBuffer data, long offset, long end) throws IOException {
         StringBuilder name = new StringBuilder();
         for (long index = offset; index < end; ++index) {
             if (((index - offset) & 0x3fff) == 0) {
@@ -133,23 +140,60 @@ final class NsoDynamic {
         throw new IOException("Nama DT_NEEDED tidak diakhiri NUL dalam tabel string.");
     }
 
-    private static void appendRelocations(StringBuilder report, NsoHeader.Segment[] segments, long[] tags)
-            throws IOException {
-        appendTable(report, segments, "RELA", tags[DT_RELA], tags[DT_RELASZ], tags[DT_RELAENT], RELA_ENTRY_SIZE);
-        appendTable(report, segments, "REL", tags[DT_REL], tags[DT_RELSZ], tags[DT_RELENT], REL_ENTRY_SIZE);
-        appendTable(report, segments, "RELR", tags[DT_RELR], tags[DT_RELRSZ], tags[DT_RELRENT], RELR_ENTRY_SIZE);
+    private static NsoRelocations.SymbolTable symbolTable(ByteBuffer data, NsoHeader.Segment[] segments,
+                                                           long[] tags, long symbolOffset, long symbolSize) {
+        long address = tags[DT_SYMTAB];
+        long strings = tags[DT_STRTAB];
+        long stringSize = tags[DT_STRSZ];
+        int entrySize = NsoRelocations.SYMBOL_ENTRY_SIZE;
+        if (address < 0 || (tags[DT_SYMENT] >= 0 && tags[DT_SYMENT] != entrySize)
+                || regionEnd(segments, strings, stringSize) < 0) {
+            return null;
+        }
+        if (symbolSize > 0) {
+            NsoHeader.Segment rodata = segments[1];
+            if (address != rodata.memoryOffset() + symbolOffset || symbolSize > rodata.unpackedSize() - symbolOffset) {
+                return null;
+            }
+        } else {
+            long hash = tags[DT_HASH];
+            if (regionEnd(segments, hash, 2 * Integer.BYTES) < 0) {
+                return null;
+            }
+            long buckets = Integer.toUnsignedLong(data.getInt((int) hash));
+            long chains = Integer.toUnsignedLong(data.getInt((int) hash + Integer.BYTES));
+            if (regionEnd(segments, hash, (2 + buckets + chains) * Integer.BYTES) < 0) {
+                return null;
+            }
+            symbolSize = chains * entrySize;
+        }
+        if (symbolSize % entrySize != 0 || regionEnd(segments, address, symbolSize) < 0) {
+            return null;
+        }
+        return new NsoRelocations.SymbolTable(address, symbolSize / entrySize, strings, stringSize);
+    }
+
+    private static void appendRelocations(StringBuilder report, NsoHeader.Segment[] segments, long[] tags,
+                                          NsoRelocations relocations) throws IOException {
+        appendTable(report, segments, "RELA", tags[DT_RELA], tags[DT_RELASZ], tags[DT_RELAENT],
+                RELA_ENTRY_SIZE, relocations);
+        appendTable(report, segments, "REL", tags[DT_REL], tags[DT_RELSZ], tags[DT_RELENT],
+                REL_ENTRY_SIZE, relocations);
+        appendTable(report, segments, "RELR", tags[DT_RELR], tags[DT_RELRSZ], tags[DT_RELRENT],
+                RELR_ENTRY_SIZE, null);
         if (tags[DT_PLTRELSZ] > 0 || tags[DT_JMPREL] >= 0) {
             long type = tags[DT_PLTREL];
             if (type != DT_REL && type != DT_RELA) {
                 throw new IOException("Format relokasi PLT tidak dikenali.");
             }
             appendTable(report, segments, type == DT_RELA ? "PLT RELA" : "PLT REL", tags[DT_JMPREL],
-                    tags[DT_PLTRELSZ], -1, type == DT_RELA ? RELA_ENTRY_SIZE : REL_ENTRY_SIZE);
+                    tags[DT_PLTRELSZ], -1, type == DT_RELA ? RELA_ENTRY_SIZE : REL_ENTRY_SIZE, relocations);
         }
     }
 
     private static void appendTable(StringBuilder report, NsoHeader.Segment[] segments, String name,
-                                    long address, long size, long declaredEntrySize, int entrySize)
+                                    long address, long size, long declaredEntrySize, int entrySize,
+                                    NsoRelocations relocations)
             throws IOException {
         if (address < 0 && size <= 0) {
             return;
@@ -159,6 +203,9 @@ final class NsoDynamic {
         }
         if (size > 0) {
             requireRange(segments, address, size, name);
+            if (relocations != null) {
+                relocations.scan(address, size, entrySize);
+            }
         }
         report.append("Relokasi ").append(name).append("  ").append(size / entrySize).append(" entri\n");
     }

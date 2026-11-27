@@ -124,7 +124,29 @@ public final class NsoHeaderTest {
         expectMetadataError(dynamicFixture().putLong(0x228, 0x10bf), "Rentang DT_STRTAB di luar data segmen");
         expectMetadataError(dynamicFixture().putLong(0x238, 17), "Nama DT_NEEDED tidak diakhiri NUL");
         expectMetadataError(dynamicFixture().putLong(0x258, 49), "Ukuran tabel relokasi RELA tidak valid");
-        System.out.println("51 NSO checks passed.");
+        String relocations = inspectMetadata(relocationFixture());
+        require(relocations.contains("R_AARCH64_RELATIVE  1 entri"), "RELA relative type");
+        require(relocations.contains("R_AARCH64_GLOB_DAT  1 entri"), "RELA symbol type");
+        require(relocations.contains("R_AARCH64_JUMP_SLOT  1 entri"), "PLT type");
+        require(relocations.contains("Referensi simbol impor  2 entri")
+                && relocations.contains("#1 imp_func\n")
+                && relocations.indexOf("#1 imp_func") == relocations.lastIndexOf("#1 imp_func"),
+                "Two references to one sampled import");
+        String defined = inspectMetadata(relocationFixture().putLong(0x318, (2L << 32) | 257));
+        require(defined.contains("R_AARCH64_ABS64  1 entri")
+                && defined.contains("Referensi simbol  3 entri\nReferensi simbol impor  2 entri"),
+                "A defined symbol is excluded from imports");
+        require(inspectMetadata(relocationFixture().putInt(0x9c, 0))
+                .contains("#1 imp_func"), "SysV DT_HASH bounds the symbol table without an NSO extent");
+        require(inspectMetadata(relocationFixture().putInt(0x9c, 0).putLong(0x2f8, 0x5000))
+                .contains("batas .dynsym atau .dynstr belum terverifikasi"), "Unbounded names are not inspected");
+        require(inspectMetadata(relocationFixture().putLong(0x348, (3L << 32) | 1026))
+                .contains("Indeks simbol di luar tabel  1 entri"), "Out-of-range symbol index is reported");
+        require(inspectMetadata(relocationFixture().putLong(0x318, 0xffff_ffffL))
+                .contains("Tipe 4294967295  1 entri"), "Unknown relocation type remains unsigned");
+        require(inspectMetadata(relocationFixture().putInt(0x180, -1))
+                .contains("#1 (nama tidak tersedia)"), "Invalid name index cannot escape the string table");
+        System.out.println("61 NSO checks passed.");
     }
 
     private static ByteBuffer fixture() throws Exception {
@@ -189,6 +211,23 @@ public final class NsoHeaderTest {
         module.putLong(2).putLong(24).putLong(20).putLong(7).putLong(23).putLong(0x1070);
         module.putLong(36).putLong(0x1088).putLong(35).putLong(16).putLong(37).putLong(8);
         module.putLong(0).putLong(0); // DT_NULL
+        return module;
+    }
+
+    private static ByteBuffer relocationFixture() {
+        ByteBuffer module = dynamicFixture();
+        byte[] strings = "\0sdk.nso\0rtld.nso\0imp_func\0defined\0".getBytes(StandardCharsets.US_ASCII);
+        module.position(0x140).put(strings);
+        module.putInt(0x98, 0x28).putInt(0x9c, 3 * 24);
+        module.putInt(0x180, 18); // Undefined symbol #1, named imp_func.
+        module.putInt(0x198, 27).putShort(0x19e, (short) 1); // Defined symbol #2.
+        module.putInt(0x1c0, 1).putInt(0x1c4, 3); // SysV hash nbucket and nchain.
+        module.putLong(0x238, strings.length);
+        module.putLong(0x248, 0x2110).putLong(0x298, 0x2140).putLong(0x2a8, 0x2158);
+        module.position(0x2d0);
+        module.putLong(6).putLong(0x1028).putLong(11).putLong(24).putLong(4).putLong(0x1080);
+        module.putLong(0).putLong(0);
+        module.putLong(0x318, 1027).putLong(0x330, (1L << 32) | 1025).putLong(0x348, (1L << 32) | 1026);
         return module;
     }
 

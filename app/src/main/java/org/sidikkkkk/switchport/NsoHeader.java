@@ -19,6 +19,8 @@ final class NsoHeader {
     private static final long ADDRESS_LIMIT = 1L << 32;
     private static final int DATA_SEGMENT = 2;
     private static final int BSS_SIZE_OFFSET = 0x3c;
+    private static final int DYNSYM_OFFSET = 0x98;
+    private static final int DYNSYM_SIZE_OFFSET = 0x9c;
     private static final long REPORT_ONLY = -1;
     private static final String[] SEGMENT_NAMES = {".text", ".rodata", ".data"};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
@@ -126,7 +128,8 @@ final class NsoHeader {
             report.append("\nMuat segmen ke buffer RAM berhasil (").append(image.length).append(" byte).\n");
             report.append('\n');
             try {
-                report.append(NsoDynamic.describe(memoryImage, segments));
+                report.append(NsoDynamic.describe(memoryImage, segments,
+                        unsignedInt(header, DYNSYM_OFFSET), unsignedInt(header, DYNSYM_SIZE_OFFSET)));
             } catch (InterruptedIOException error) {
                 throw error;
             } catch (IOException error) {

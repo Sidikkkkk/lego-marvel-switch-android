@@ -14,7 +14,7 @@ Keep the full ExeFS and matching RomFS on your device for future runtime testing
 
 ## Develop
 
-- CI builds with JDK 17, Gradle 8.7, Android SDK platform 34 and Build Tools 34.0.0. From Termux, use Git to submit code and use Actions for the SDK build.
+- CI builds on Ubuntu 24.04 with JDK 17, Gradle 8.7, Android SDK platform 34 and Build Tools 34.0.0. From Termux, use Git to submit code and use Actions for the SDK build.
 - Run `sh tools/test-nso.sh` with JDK 17+ for the host tests. All fixtures are synthetic.
 - Inspect a local module with the same parser by running `sh tools/test-nso.sh /path/to/exefs/main`.
 - See [AGENTS.md](AGENTS.md) for verification, bug fixes and upgrades.

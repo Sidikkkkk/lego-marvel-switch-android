@@ -2,7 +2,7 @@
 
 An open-source Android compatibility project targeting the Switch edition of LEGO Marvel Super Heroes. This project is unofficial and independent of the game publishers and IP owners.
 
-**Current milestone:** verify and stage the original `exefs/main` in an Android heap buffer, then inspect its `MOD0` loading metadata when present. The report lists declared dependencies and the sizes of relocation tables as entry counts. Relocation processing, host page mapping, guest execution, RomFS access, Horizon services, NVN translation, and Vulkan presentation are pending.
+**Current milestone:** verify and stage the original `exefs/main` in an Android heap buffer, then inspect its `MOD0` loading metadata when present. The report lists dependencies, relocation table sizes, AArch64 relocation types, and sample imported symbol names. Applying relocations, host page mapping, guest execution, RomFS access, Horizon services, NVN translation, and Vulkan presentation are pending.
 
 ## Use the diagnostic app
 
@@ -22,5 +22,7 @@ Keep the full ExeFS and matching RomFS on your device for future runtime testing
 The verifier follows [hactool's NSO header](https://github.com/SciresM/hactool/blob/master/nso.h), [its reader](https://github.com/SciresM/hactool/blob/master/nso.c), and the [LZ4 block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md). Hashes are checked against the decoded bytes when present. Executable validity requires separate checks.
 
 The metadata reader follows the [libnx startup header](https://github.com/switchbrew/libnx/blob/master/nx/source/runtime/switch_crt0.s) and the [ELF dynamic table format](https://gabi.xinuos.com/elf/08-dynamic.html). RELR counts describe packed table entries. A missing or malformed `MOD0` is reported separately from successful segment verification.
+
+The relocation report uses [ELF relocation and symbol layouts](https://gabi.xinuos.com/elf/06-reloc.html) and [Arm's AArch64 ELF ABI](https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst). Import names require a verifiable symbol table range from the NSO header or SysV `DT_HASH` and a valid dynamic string table. The report caps the number of type rows and displayed names. Import reference counts include repeats.
 
 Code is licensed under [MIT](LICENSE). Original game files remain on your device.

@@ -4,6 +4,7 @@ import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 
 final class Lz4Block {
@@ -15,19 +16,22 @@ final class Lz4Block {
     private final DataInputStream input;
     private final long unpackedSize;
     private final MessageDigest digest;
+    private final ByteBuffer destination;
     private long remaining;
     private long written;
 
-    private Lz4Block(DataInputStream input, long storedSize, long unpackedSize, MessageDigest digest) {
+    private Lz4Block(DataInputStream input, long storedSize, long unpackedSize,
+                     MessageDigest digest, ByteBuffer destination) {
         this.input = input;
         this.remaining = storedSize;
         this.unpackedSize = unpackedSize;
         this.digest = digest;
+        this.destination = destination;
     }
 
-    static void verify(DataInputStream input, long storedSize, long unpackedSize, MessageDigest digest)
-            throws IOException {
-        new Lz4Block(input, storedSize, unpackedSize, digest).verify();
+    static void verify(DataInputStream input, long storedSize, long unpackedSize,
+                       MessageDigest digest, ByteBuffer destination) throws IOException {
+        new Lz4Block(input, storedSize, unpackedSize, digest, destination).verify();
     }
 
     private void verify() throws IOException {
@@ -117,6 +121,9 @@ final class Lz4Block {
     private void commitChunk(int start, int count) {
         if (digest != null) {
             digest.update(history, start, count);
+        }
+        if (destination != null) {
+            destination.put(history, start, count);
         }
         written += count;
     }

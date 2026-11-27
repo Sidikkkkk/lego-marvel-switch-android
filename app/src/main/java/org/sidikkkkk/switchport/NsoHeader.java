@@ -19,6 +19,7 @@ final class NsoHeader {
     private static final long ADDRESS_LIMIT = 1L << 32;
     private static final int DATA_SEGMENT = 2;
     private static final int BSS_SIZE_OFFSET = 0x3c;
+    private static final long REPORT_ONLY = -1;
     private static final String[] SEGMENT_NAMES = {".text", ".rodata", ".data"};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
@@ -31,9 +32,15 @@ final class NsoHeader {
 
     private record MemoryLayout(long bssStart, long bssSize, long rangeEnd, long usedSize) {}
 
+    record Inspection(String report, ByteBuffer memoryImage) {}
+
     private NsoHeader() {}
 
     static String inspect(InputStream input, long fileLength) throws IOException {
+        return inspect(input, fileLength, REPORT_ONLY).report();
+    }
+
+    static Inspection inspect(InputStream input, long fileLength, long memoryBudget) throws IOException {
         byte[] bytes = new byte[HEADER_SIZE];
         DataInputStream data = new DataInputStream(new BufferedInputStream(input));
         try {
@@ -86,7 +93,8 @@ final class NsoHeader {
             throw new IOException("File NSO0 terpotong. Header memerlukan sedikitnya " + minimumSize + " byte.");
         }
         MemoryLayout memory = memoryLayout(segments, unsignedInt(header, BSS_SIZE_OFFSET));
-        verifySegments(data, segments);
+        byte[] image = allocateImage(memory.rangeEnd, memoryBudget);
+        verifySegments(data, segments, image);
 
         StringBuilder report = new StringBuilder("Segmen NSO0 berhasil diperiksa\nBuild ID  ");
         for (int index = 0x40; index < 0x60; ++index) {
@@ -113,12 +121,29 @@ final class NsoHeader {
                 .append(")  ").append(memory.rangeEnd).append(" byte\n")
                 .append("Segmen dan .bss  ").append(memory.usedSize).append(" byte\n")
                 .append("Celah dalam rentang  ").append(memory.rangeEnd - memory.usedSize).append(" byte\n");
+        if (image != null) {
+            report.append("\nMuat segmen ke buffer RAM berhasil (").append(image.length).append(" byte).\n");
+        } else if (memoryBudget >= 0) {
+            report.append("\nMuat ke RAM dilewati. Buffer tidak tersedia dalam batas heap untuk uji ini.\n");
+        }
         if (fileLength < 0) {
             report.append("\nUkuran file tidak tersedia. Semua segmen berhasil dibaca.");
         } else {
             report.append("\nUkuran file  ").append(fileLength).append(" byte");
         }
-        return report.toString();
+        ByteBuffer memoryImage = image == null ? null : ByteBuffer.wrap(image).asReadOnlyBuffer();
+        return new Inspection(report.toString(), memoryImage);
+    }
+
+    private static byte[] allocateImage(long size, long memoryBudget) {
+        if (size > memoryBudget || size > Integer.MAX_VALUE) {
+            return null;
+        }
+        try {
+            return new byte[(int) size];
+        } catch (OutOfMemoryError error) {
+            return null;
+        }
     }
 
     private static MemoryLayout memoryLayout(Segment[] segments, long bssSize) throws IOException {
@@ -142,7 +167,7 @@ final class NsoHeader {
         return new MemoryLayout(bssStart, bssSize, rangeEnd, usedSize);
     }
 
-    private static void verifySegments(DataInputStream input, Segment[] segments) throws IOException {
+    private static void verifySegments(DataInputStream input, Segment[] segments, byte[] image) throws IOException {
         Segment[] fileOrder = segments.clone();
         Arrays.sort(fileOrder, Comparator.comparingLong(Segment::fileOffset));
         byte[] buffer = new byte[16 * 1024];
@@ -152,10 +177,12 @@ final class NsoHeader {
             try {
                 if (segment.storedSize > 0) {
                     skipFully(input, segment.fileOffset - position);
+                    ByteBuffer destination = image == null || segment.unpackedSize == 0 ? null
+                            : ByteBuffer.wrap(image, (int) segment.memoryOffset, (int) segment.unpackedSize);
                     if (segment.compressed) {
-                        Lz4Block.verify(input, segment.storedSize, segment.unpackedSize, digest);
+                        Lz4Block.verify(input, segment.storedSize, segment.unpackedSize, digest, destination);
                     } else {
-                        readRaw(input, segment.storedSize, buffer, digest);
+                        readRaw(input, segment.storedSize, buffer, digest, destination);
                     }
                     position = segment.fileOffset + segment.storedSize;
                 }
@@ -184,14 +211,17 @@ final class NsoHeader {
         }
     }
 
-    private static void readRaw(DataInputStream input, long length, byte[] buffer, MessageDigest digest)
-            throws IOException {
+    private static void readRaw(DataInputStream input, long length, byte[] buffer,
+                                MessageDigest digest, ByteBuffer destination) throws IOException {
         while (length > 0) {
             checkInterrupted();
             int count = (int) Math.min(length, buffer.length);
             input.readFully(buffer, 0, count);
             if (digest != null) {
                 digest.update(buffer, 0, count);
+            }
+            if (destination != null) {
+                destination.put(buffer, 0, count);
             }
             length -= count;
         }

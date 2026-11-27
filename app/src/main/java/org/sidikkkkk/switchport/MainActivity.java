@@ -78,7 +78,10 @@ public final class MainActivity extends Activity {
                 return "File tidak bisa dibuka.";
             }
             try (InputStream input = file.createInputStream()) {
-                return NsoHeader.inspect(input, file.getLength());
+                Runtime runtime = Runtime.getRuntime();
+                long usedHeap = runtime.totalMemory() - runtime.freeMemory();
+                long memoryBudget = Math.max(0L, runtime.maxMemory() - usedHeap) / 2;
+                return NsoHeader.inspect(input, file.getLength(), memoryBudget).report();
             }
         } catch (IOException | SecurityException error) {
             String message = error.getMessage();

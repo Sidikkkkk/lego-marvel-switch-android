@@ -1,11 +1,17 @@
 package org.sidikkkkk.switchport;
 
+import java.io.BufferedInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Comparator;
 
 final class NsoHeader {
     private static final int HEADER_SIZE = 0x100;
@@ -14,15 +20,16 @@ final class NsoHeader {
     private static final String[] SEGMENT_NAMES = {".text", ".rodata", ".data"};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
-    private record Segment(long fileOffset, long storedSize, long memoryOffset,
-                           long unpackedSize, boolean compressed) {}
+    private record Segment(String name, long fileOffset, long storedSize, long memoryOffset,
+                           long unpackedSize, boolean compressed, byte[] expectedHash) {}
 
     private NsoHeader() {}
 
     static String inspect(InputStream input, long fileLength) throws IOException {
         byte[] bytes = new byte[HEADER_SIZE];
+        DataInputStream data = new DataInputStream(new BufferedInputStream(input));
         try {
-            new DataInputStream(input).readFully(bytes);
+            data.readFully(bytes);
         } catch (EOFException error) {
             throw new IOException("Header NSO0 terpotong.", error);
         }
@@ -43,12 +50,16 @@ final class NsoHeader {
             boolean compressed = (flags & (1 << index)) != 0;
             long storedSize = compressed ? unsignedInt(header, 0x60 + index * 4) : unpackedSize;
             if (memoryOffset + unpackedSize > ADDRESS_LIMIT
-                    || (compressed && (storedSize == 0) != (unpackedSize == 0))
+                    || (compressed && storedSize == 0 && unpackedSize > 0)
                     || (storedSize > 0 && fileOffset < HEADER_SIZE)) {
                 throw new IOException("Rentang atau ukuran segmen " + SEGMENT_NAMES[index] + " tidak valid.");
             }
 
-            Segment segment = new Segment(fileOffset, storedSize, memoryOffset, unpackedSize, compressed);
+            int hashOffset = 0xa0 + index * 0x20;
+            byte[] expectedHash = (flags & (1 << (index + 3))) != 0
+                    ? Arrays.copyOfRange(bytes, hashOffset, hashOffset + 0x20) : null;
+            Segment segment = new Segment(SEGMENT_NAMES[index], fileOffset, storedSize,
+                    memoryOffset, unpackedSize, compressed, expectedHash);
             for (int previous = 0; previous < index; ++previous) {
                 Segment other = segments[previous];
                 if (overlaps(segment.fileOffset, segment.storedSize, other.fileOffset, other.storedSize)
@@ -66,28 +77,99 @@ final class NsoHeader {
         if (fileLength >= 0 && fileLength < minimumSize) {
             throw new IOException("File NSO0 terpotong. Header memerlukan sedikitnya " + minimumSize + " byte.");
         }
+        verifySegments(data, segments);
 
-        StringBuilder report = new StringBuilder("Header NSO0 terbaca\nBuild ID  ");
+        StringBuilder report = new StringBuilder("Segmen NSO0 berhasil diperiksa\nBuild ID  ");
         for (int index = 0x40; index < 0x60; ++index) {
             int value = Byte.toUnsignedInt(bytes[index]);
             report.append(HEX[value >>> 4]).append(HEX[value & 0x0f]);
         }
         report.append("\n\n");
-        for (int index = 0; index < segments.length; ++index) {
-            Segment segment = segments[index];
-            report.append(SEGMENT_NAMES[index])
+        for (Segment segment : segments) {
+            report.append(segment.name)
                     .append("  file 0x").append(Long.toHexString(segment.fileOffset))
                     .append("  memori 0x").append(Long.toHexString(segment.memoryOffset))
                     .append("\n").append(segment.storedSize).append(" byte tersimpan, ")
                     .append(segment.unpackedSize).append(" byte di memori")
-                    .append(segment.compressed ? " (terkompresi)\n" : "\n");
+                    .append(segment.compressed ? " (terkompresi)\n" : "\n")
+                    .append(segment.expectedHash != null
+                            ? "SHA-256 sesuai header\n" : "SHA-256 tidak tersedia di header\n");
         }
         if (fileLength < 0) {
-            report.append("\nPenyedia file tidak memberi ukuran. Batas akhir segmen belum diperiksa.");
+            report.append("\nUkuran file tidak tersedia. Semua segmen berhasil dibaca.");
         } else {
             report.append("\nUkuran file  ").append(fileLength).append(" byte");
         }
         return report.toString();
+    }
+
+    private static void verifySegments(DataInputStream input, Segment[] segments) throws IOException {
+        Segment[] fileOrder = segments.clone();
+        Arrays.sort(fileOrder, Comparator.comparingLong(Segment::fileOffset));
+        byte[] buffer = new byte[16 * 1024];
+        long position = HEADER_SIZE;
+        for (Segment segment : fileOrder) {
+            MessageDigest digest = segment.expectedHash != null ? newSha256() : null;
+            try {
+                if (segment.storedSize > 0) {
+                    skipFully(input, segment.fileOffset - position);
+                    if (segment.compressed) {
+                        Lz4Block.verify(input, segment.storedSize, segment.unpackedSize, digest);
+                    } else {
+                        readRaw(input, segment.storedSize, buffer, digest);
+                    }
+                    position = segment.fileOffset + segment.storedSize;
+                }
+                if (digest != null && !MessageDigest.isEqual(digest.digest(), segment.expectedHash)) {
+                    throw new IOException("SHA-256 berbeda dari header.");
+                }
+            } catch (EOFException error) {
+                String detail = error.getMessage();
+                throw new IOException("Segmen " + segment.name + " terpotong."
+                        + (detail == null ? "" : " " + detail), error);
+            } catch (IOException error) {
+                throw new IOException("Segmen " + segment.name + ": " + error.getMessage(), error);
+            }
+        }
+    }
+
+    private static void skipFully(DataInputStream input, long length) throws IOException {
+        while (length > 0) {
+            checkInterrupted();
+            long skipped = input.skip(length);
+            if (skipped == 0) {
+                input.readUnsignedByte();
+                skipped = 1;
+            }
+            length -= skipped;
+        }
+    }
+
+    private static void readRaw(DataInputStream input, long length, byte[] buffer, MessageDigest digest)
+            throws IOException {
+        while (length > 0) {
+            checkInterrupted();
+            int count = (int) Math.min(length, buffer.length);
+            input.readFully(buffer, 0, count);
+            if (digest != null) {
+                digest.update(buffer, 0, count);
+            }
+            length -= count;
+        }
+    }
+
+    private static void checkInterrupted() throws InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedIOException("Pemeriksaan NSO0 dibatalkan.");
+        }
+    }
+
+    private static MessageDigest newSha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 tidak tersedia.", error);
+        }
     }
 
     private static long unsignedInt(ByteBuffer source, int offset) {

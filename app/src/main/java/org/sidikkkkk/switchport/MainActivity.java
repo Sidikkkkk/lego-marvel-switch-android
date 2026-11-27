@@ -40,7 +40,7 @@ public final class MainActivity extends Activity {
 
         status = new TextView(this);
         status.setTextIsSelectable(true);
-        status.setText("Inspeksi header game Switch. Eksekusi game belum tersedia.");
+        status.setText("Pemeriksaan file game Switch. Eksekusi game belum tersedia.");
         content.addView(status);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
@@ -55,7 +55,7 @@ public final class MainActivity extends Activity {
             return;
         }
         Uri uri = result.getData();
-        status.setText("Sedang membaca header NSO0…");
+        status.setText("Sedang memeriksa segmen NSO0…");
         inspector.execute(() -> {
             String report = inspect(uri);
             runOnUiThread(() -> {

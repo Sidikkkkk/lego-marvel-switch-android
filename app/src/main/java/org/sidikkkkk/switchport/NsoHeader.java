@@ -17,11 +17,19 @@ final class NsoHeader {
     private static final int HEADER_SIZE = 0x100;
     private static final int MAGIC = 0x304f534e;
     private static final long ADDRESS_LIMIT = 1L << 32;
+    private static final int DATA_SEGMENT = 2;
+    private static final int BSS_SIZE_OFFSET = 0x3c;
     private static final String[] SEGMENT_NAMES = {".text", ".rodata", ".data"};
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
     private record Segment(String name, long fileOffset, long storedSize, long memoryOffset,
-                           long unpackedSize, boolean compressed, byte[] expectedHash) {}
+                           long unpackedSize, boolean compressed, byte[] expectedHash) {
+        long memoryEnd() {
+            return memoryOffset + unpackedSize;
+        }
+    }
+
+    private record MemoryLayout(long bssStart, long bssSize, long rangeEnd, long usedSize) {}
 
     private NsoHeader() {}
 
@@ -77,6 +85,7 @@ final class NsoHeader {
         if (fileLength >= 0 && fileLength < minimumSize) {
             throw new IOException("File NSO0 terpotong. Header memerlukan sedikitnya " + minimumSize + " byte.");
         }
+        MemoryLayout memory = memoryLayout(segments, unsignedInt(header, BSS_SIZE_OFFSET));
         verifySegments(data, segments);
 
         StringBuilder report = new StringBuilder("Segmen NSO0 berhasil diperiksa\nBuild ID  ");
@@ -88,19 +97,49 @@ final class NsoHeader {
         for (Segment segment : segments) {
             report.append(segment.name)
                     .append("  file 0x").append(Long.toHexString(segment.fileOffset))
-                    .append("  memori 0x").append(Long.toHexString(segment.memoryOffset))
+                    .append("  memori [0x").append(Long.toHexString(segment.memoryOffset))
+                    .append(", 0x").append(Long.toHexString(segment.memoryEnd())).append(")")
                     .append("\n").append(segment.storedSize).append(" byte tersimpan, ")
                     .append(segment.unpackedSize).append(" byte di memori")
                     .append(segment.compressed ? " (terkompresi)\n" : "\n")
                     .append(segment.expectedHash != null
                             ? "SHA-256 sesuai header\n" : "SHA-256 tidak tersedia di header\n");
         }
+        report.append("\nTata letak memori (offset relatif)\n")
+                .append(".bss [0x").append(Long.toHexString(memory.bssStart))
+                .append(", 0x").append(Long.toHexString(memory.bssStart + memory.bssSize))
+                .append(")  ").append(memory.bssSize).append(" byte\n")
+                .append("Rentang dari base [0x0, 0x").append(Long.toHexString(memory.rangeEnd))
+                .append(")  ").append(memory.rangeEnd).append(" byte\n")
+                .append("Segmen dan .bss  ").append(memory.usedSize).append(" byte\n")
+                .append("Celah dalam rentang  ").append(memory.rangeEnd - memory.usedSize).append(" byte\n");
         if (fileLength < 0) {
             report.append("\nUkuran file tidak tersedia. Semua segmen berhasil dibaca.");
         } else {
             report.append("\nUkuran file  ").append(fileLength).append(" byte");
         }
         return report.toString();
+    }
+
+    private static MemoryLayout memoryLayout(Segment[] segments, long bssSize) throws IOException {
+        long bssStart = segments[DATA_SEGMENT].memoryEnd();
+        long bssEnd = bssStart + bssSize;
+        if (bssEnd > ADDRESS_LIMIT) {
+            throw new IOException("Rentang memori .bss melampaui batas offset NSO0.");
+        }
+
+        long rangeEnd = bssSize > 0 ? bssEnd : 0;
+        long usedSize = bssSize;
+        for (Segment segment : segments) {
+            if (overlaps(bssStart, bssSize, segment.memoryOffset, segment.unpackedSize)) {
+                throw new IOException("Rentang memori .bss bertumpang tindih dengan " + segment.name + ".");
+            }
+            if (segment.unpackedSize > 0) {
+                rangeEnd = Math.max(rangeEnd, segment.memoryEnd());
+                usedSize += segment.unpackedSize;
+            }
+        }
+        return new MemoryLayout(bssStart, bssSize, rangeEnd, usedSize);
     }
 
     private static void verifySegments(DataInputStream input, Segment[] segments) throws IOException {

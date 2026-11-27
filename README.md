@@ -2,13 +2,13 @@
 
 An open-source Android compatibility project targeting the Switch edition of LEGO Marvel Super Heroes. This project is unofficial and independent of the game publishers and IP owners.
 
-**Current milestone:** verify the original `exefs/main` and test building its module image in an Android heap buffer. The diagnostic validates segment ranges, decoded sizes, and supplied SHA-256 hashes, and copies decoded bytes into their relative positions. The BSS and gaps retain their initial zero bytes. Host page mapping, guest execution, RomFS access, Horizon services, NVN translation, and Vulkan presentation are pending.
+**Current milestone:** verify and stage the original `exefs/main` in an Android heap buffer, then inspect its `MOD0` loading metadata when present. The report lists declared dependencies and the sizes of relocation tables as entry counts. Relocation processing, host page mapping, guest execution, RomFS access, Horizon services, NVN translation, and Vulkan presentation are pending.
 
 ## Use the diagnostic app
 
 1. In GitHub Actions, open a successful **Android CI** run and download the `switch-port-debug` artifact. Extract and install the debug APK.
 2. Tap **Pilih file main dari ExeFS** and select the original `exefs/main` from your own Switch copy.
-3. The app displays the NSO build ID, segment ranges, hash results, logical memory layout, and whether the temporary RAM load succeeded. Range ends are exclusive. The span starts at the module base and uses byte offsets before host page alignment.
+3. The app displays the NSO build ID, segment ranges, hash results, logical memory layout, and whether the temporary RAM load succeeded. When staging succeeds, it also reports whether the `MOD0` header and its dynamic table were readable. Range ends are exclusive. The span uses byte offsets before host page alignment.
 
 Keep the full ExeFS and matching RomFS on your device for future runtime testing. The diagnostic reads the selected NSO in chunks and uses a 64 KiB history buffer for LZ4. It attempts the temporary allocation within half the remaining app heap limit and continues verification when the buffer is unavailable.
 
@@ -20,5 +20,7 @@ Keep the full ExeFS and matching RomFS on your device for future runtime testing
 - See [AGENTS.md](AGENTS.md) for verification, bug fixes and upgrades.
 
 The verifier follows [hactool's NSO header](https://github.com/SciresM/hactool/blob/master/nso.h), [its reader](https://github.com/SciresM/hactool/blob/master/nso.c), and the [LZ4 block format](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md). Hashes are checked against the decoded bytes when present. Executable validity requires separate checks.
+
+The metadata reader follows the [libnx startup header](https://github.com/switchbrew/libnx/blob/master/nx/source/runtime/switch_crt0.s) and the [ELF dynamic table format](https://gabi.xinuos.com/elf/08-dynamic.html). RELR counts describe packed table entries. A missing or malformed `MOD0` is reported separately from successful segment verification.
 
 Code is licensed under [MIT](LICENSE). Original game files remain on your device.

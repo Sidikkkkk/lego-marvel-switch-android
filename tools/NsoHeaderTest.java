@@ -56,7 +56,24 @@ public final class NsoHeaderTest {
         byte[] wrapsHistory = largeMatchFixture();
         require(NsoHeader.inspect(new ByteArrayInputStream(wrapsHistory), wrapsHistory.length)
                 .contains("(terkompresi)\nSHA-256 sesuai header"), "Match crosses history buffer boundary");
-        System.out.println("22 NSO checks passed.");
+        require(report.contains(".bss [0x2020, 0x2020)  0 byte"), "Zero-sized BSS");
+        byte[] withBss = fixture().putInt(0x3c, 0x123).array();
+        String memoryReport = NsoHeader.inspect(new ByteArrayInputStream(withBss), withBss.length);
+        require(memoryReport.contains(".bss [0x2020, 0x2143)  291 byte"), "BSS starts after decoded data");
+        require(memoryReport.contains("Rentang dari base [0x0, 0x2143)  8515 byte"), "Unrounded image span");
+        require(memoryReport.contains("Segmen dan .bss  387 byte\nCelah dalam rentang  8128 byte"),
+                "Occupied bytes and gaps");
+        expectError(fixture().putInt(0x24, 0x2040).putInt(0x3c, 0x40).array(), MODULE_SIZE,
+                ".bss bertumpang tindih dengan .rodata");
+        expectError(fixture().putInt(0x34, 0xffffffd0).putInt(0x3c, 0x11).array(), MODULE_SIZE,
+                ".bss melampaui batas offset");
+        byte[] endAtLimit = fixture().putInt(0x34, 0xffffffd0).putInt(0x3c, 0x10).array();
+        require(NsoHeader.inspect(new ByteArrayInputStream(endAtLimit), endAtLimit.length)
+                .contains(".bss [0xfffffff0, 0x100000000)  16 byte"), "Exclusive end at offset limit");
+        byte[] emptyAtEnd = module(new byte[]{0}, new byte[0]).putInt(0x34, 0xfffffff0).array();
+        require(NsoHeader.inspect(new ByteArrayInputStream(emptyAtEnd), emptyAtEnd.length)
+                .contains("Rentang dari base [0x0, 0x1020)"), "Empty segment does not enlarge image span");
+        System.out.println("30 NSO checks passed.");
     }
 
     private static ByteBuffer fixture() throws Exception {

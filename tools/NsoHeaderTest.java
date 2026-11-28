@@ -163,6 +163,8 @@ public final class NsoHeaderTest {
         testStartupUnscaledLoadCompare();
         testStartupPostIndexedLoad();
         testStartupInstructionBudget();
+        testStartupWordImmediateCompare();
+        testStartupRegisterOffsetStore();
         System.out.println("NSO checks passed.");
     }
 
@@ -486,6 +488,43 @@ public final class NsoHeaderTest {
         require(report.lines().filter(line -> line.contains("0x200000008 B → 0x200000008")).count() == 1023
                 && report.contains("Jejak berhenti setelah 1024 instruksi.")
                 && report.contains("Kata .text mulai 0x200000008"), "The probe still limits an infinite loop");
+    }
+
+    private static void testStartupWordImmediateCompare() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2c0002d).putInt(0x10c, 0x710001bf).putInt(0x110, 0x54000040)
+                .putInt(0x118, 0x52b0000d).putInt(0x11c, 0x710005bf)
+                .putInt(0x120, 0x5280000d).putInt(0x124, 0x710005bf);
+        String report = startupReport(main, rtld);
+        require(report.contains("CMP W13, #0x0 (NZCV = 0x6)")
+                && report.contains("B.EQ → 0x200000018 (diambil)")
+                && report.contains("0x20000001c CMP W13, #0x1 (NZCV = 0x3)")
+                && report.contains("0x200000024 CMP W13, #0x1 (NZCV = 0x8)"),
+                "Word comparison ignores the high half and computes 32-bit overflow and borrow");
+    }
+
+    private static void testStartupRegisterOffsetStore() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91078108).putInt(0x110, 0xd2800109)
+                .putInt(0x114, 0xd2c0002a).putInt(0x118, 0xf829690a)
+                .putInt(0x11c, 0xf9400504).putInt(0x120, 0xb9400d05);
+        rtld.putLong(0x3e8, 0xdeadbeef01234567L);
+        String report = startupReport(main, rtld);
+        require(report.contains("STR X10, [X8, X9] @0x2000021e8 = 0x100000000 (.data simulasi)")
+                && report.contains("LDR X4, [X8, #0x8] @0x2000021e8 = 0x100000000")
+                && report.contains("LDR W5, [X8, #0xc] @0x2000021ec = 0x1"),
+                "Register-offset writes affect both word and doubleword reads from the data overlay");
+        rtld.putInt(0x10c, 0x91080108);
+        require(startupReport(main, rtld).contains("STR X10, [X8, X9] @0x200002208 = 0x100000000 (.bss simulasi)"),
+                "Register-offset stores can also target BSS");
+        rtld.putInt(0x108, 0xb0000008).putInt(0x10c, 0x91000108);
+        require(startupReport(main, rtld).contains("STR X10, [X8, X9] @0x200001008 — jejak berhenti, alamat simpan di luar .data atau .bss rtld."),
+                "Register-offset stores reject read-only segments");
+        rtld.putInt(0x118, 0xf829790a);
+        require(startupReport(main, rtld).contains("kata 0xf829790a — jejak berhenti, instruksi di luar cakupan."),
+                "Scaled register-offset stores remain unsupported");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

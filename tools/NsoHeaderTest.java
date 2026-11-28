@@ -146,7 +146,41 @@ public final class NsoHeaderTest {
                 .contains("Tipe 4294967295  1 entri"), "Unknown relocation type remains unsigned");
         require(inspectMetadata(relocationFixture().putInt(0x180, -1))
                 .contains("#1 (nama tidak tersedia)"), "Invalid name index cannot escape the string table");
-        System.out.println("61 NSO checks passed.");
+        testRelativeRelocations();
+        System.out.println("NSO checks passed.");
+    }
+
+    private static void testRelativeRelocations() throws IOException {
+        ByteBuffer module = relocationFixture();
+        module.putLong(0x310, 0x21c0).putLong(0x320, 0x2180);
+        module.putLong(0x328, 0x21c8).putLong(0x3c8, 0x1234);
+        module.putLong(0x340, 0x21d0).putLong(0x3d0, 0x5678);
+        require(!inspectMetadata(module).contains("basis simulasi"), "Application is opt-in");
+
+        NsoHeader.Inspection result = inspectRelative(module);
+        ByteBuffer image = result.memoryImage().order(ByteOrder.LITTLE_ENDIAN);
+        require(result.report().contains("basis simulasi 0x100000000")
+                && result.report().contains("1 entri diterapkan ke buffer RAM.")
+                && image.getLong(0x21c0) == 0x1_0000_2180L, "Report and computed relocation");
+        require(image.isReadOnly() && image.getLong(0x21c8) == 0x1234 && image.getLong(0x21d0) == 0x5678
+                && module.getLong(0x3c0) == 0, "Other relocation types and source bytes are preserved");
+
+        module.putLong(0x328, 0x2200).putLong(0x330, 1027).putLong(0x338, -16);
+        result = inspectRelative(module);
+        require(result.report().contains("2 entri diterapkan ke buffer RAM.")
+                && result.memoryImage().order(ByteOrder.LITTLE_ENDIAN).getLong(0x2200) == 0xffff_fff0L,
+                "Negative explicit addend in .bss");
+
+        for (long invalidTarget : new long[]{0x21c9, 0x1800, 0x2118, 0x2220, -8}) {
+            result = inspectRelative(module.putLong(0x328, invalidTarget));
+            require(result.report().contains("R_AARCH64_RELATIVE  2 entri")
+                    && result.report().contains("Uji dibatalkan sebelum penulisan.")
+                    && result.memoryImage().getLong(0x21c0) == 0,
+                    "Invalid later target must leave the first target intact: " + invalidTarget);
+        }
+        result = inspectRelative(module.putLong(0x328, 0x21d8).putLong(0x330, (1L << 32) | 1027));
+        require(result.report().contains("Uji dibatalkan sebelum penulisan.")
+                && result.memoryImage().getLong(0x21c0) == 0, "Unsupported symbol index prevents all writes");
     }
 
     private static ByteBuffer fixture() throws Exception {
@@ -233,6 +267,10 @@ public final class NsoHeaderTest {
 
     private static String inspectMetadata(ByteBuffer module) throws IOException {
         return NsoHeader.inspect(new ByteArrayInputStream(module.array()), module.capacity(), 0x2220).report();
+    }
+
+    private static NsoHeader.Inspection inspectRelative(ByteBuffer module) throws IOException {
+        return NsoHeader.inspectWithRelativeTest(new ByteArrayInputStream(module.array()), module.capacity(), 0x2220);
     }
 
     private static void expectMetadataError(ByteBuffer module, String detail) throws IOException {

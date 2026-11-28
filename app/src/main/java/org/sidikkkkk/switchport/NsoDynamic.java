@@ -13,6 +13,7 @@ final class NsoDynamic {
     private static final int RELA_ENTRY_SIZE = 24;
     private static final int REL_ENTRY_SIZE = 16;
     private static final int RELR_ENTRY_SIZE = 8;
+    private static final long SIMULATED_BASE = 0x1_0000_0000L;
     private static final int DT_NEEDED = 1;
     private static final int DT_PLTRELSZ = 2;
     private static final int DT_HASH = 4;
@@ -36,8 +37,8 @@ final class NsoDynamic {
 
     private NsoDynamic() {}
 
-    static String describe(ByteBuffer image, NsoHeader.Segment[] segments, long symbolOffset, long symbolSize)
-            throws IOException {
+    static String describe(ByteBuffer image, NsoHeader.Segment[] segments, long symbolOffset, long symbolSize,
+                           long bssStart, long bssEnd) throws IOException {
         NsoHeader.Segment text = segments[0];
         if (text.unpackedSize() < 8) {
             return "MOD0 tidak terdeteksi pada awalan .text.\n";
@@ -71,6 +72,9 @@ final class NsoDynamic {
                         symbolTable(data, segments, tags, symbolOffset, symbolSize));
                 appendRelocations(report, segments, tags, relocations);
                 relocations.appendReport(report);
+                if (!data.isReadOnly()) {
+                    appendRelativeTest(report, data, segments, tags, bssStart, bssEnd);
+                }
                 return report.toString();
             }
             long value = data.getLong((int) entry + Long.BYTES);
@@ -88,6 +92,64 @@ final class NsoDynamic {
             ++dynamicCount;
         }
         throw new IOException("DT_NULL tidak ditemukan di dalam segmen .dynamic.");
+    }
+
+    private static void appendRelativeTest(StringBuilder report, ByteBuffer data, NsoHeader.Segment[] segments,
+                                           long[] tags, long bssStart, long bssEnd) throws InterruptedIOException {
+        report.append("\nUji R_AARCH64_RELATIVE (DT_RELA, basis simulasi 0x")
+                .append(Long.toHexString(SIMULATED_BASE)).append(")\n");
+        if (segments[0].memoryOffset() != 0) {
+            report.append("Uji dilewati karena offset .text bukan nol.\n");
+            return;
+        }
+        long size = tags[DT_RELASZ];
+        if (size <= 0) {
+            report.append("Tabel DT_RELA kosong atau tidak tersedia.\n");
+            return;
+        }
+        try {
+            long applied = applyRelativeEntries(data, segments, tags[DT_RELA], size, bssStart, bssEnd);
+            report.append(applied).append(" entri diterapkan ke buffer RAM.\n");
+        } catch (InterruptedIOException error) {
+            throw error;
+        } catch (IOException error) {
+            report.append("Uji dibatalkan sebelum penulisan. ").append(error.getMessage()).append('\n');
+        }
+    }
+
+    private static long applyRelativeEntries(ByteBuffer data, NsoHeader.Segment[] segments,
+                                             long start, long size, long bssStart, long bssEnd) throws IOException {
+        long end = start + size;
+        // The caller has validated the table extent and entry size. Validate all destinations before writing.
+        for (long entry = start; entry < end; entry += RELA_ENTRY_SIZE) {
+            checkInterrupted();
+            long info = data.getLong((int) entry + Long.BYTES);
+            if ((int) info != NsoRelocations.AARCH64_RELATIVE) {
+                continue;
+            }
+            long target = data.getLong((int) entry);
+            boolean inBss = target >= bssStart && target <= bssEnd - Long.BYTES;
+            if ((info >>> 32) != 0 || (target & (Long.BYTES - 1)) != 0
+                    || (!inBss && regionEnd(segments, target, Long.BYTES) < 0)
+                    || (target < end && target + Long.BYTES > start)) {
+                throw new IOException("Entri RELATIVE #" + (entry - start) / RELA_ENTRY_SIZE
+                        + " memiliki indeks simbol atau target yang tidak valid (0x"
+                        + Long.toHexString(target) + ").");
+            }
+        }
+        checkInterrupted();
+
+        long applied = 0;
+        for (long entry = start; entry < end; entry += RELA_ENTRY_SIZE) {
+            int offset = (int) entry;
+            if (data.getInt(offset + Long.BYTES) == NsoRelocations.AARCH64_RELATIVE) {
+                int target = (int) data.getLong(offset);
+                long addend = data.getLong(offset + 2 * Long.BYTES);
+                data.putLong(target, SIMULATED_BASE + addend);
+                ++applied;
+            }
+        }
+        return applied;
     }
 
     private static boolean isTrackedTag(int tag) {

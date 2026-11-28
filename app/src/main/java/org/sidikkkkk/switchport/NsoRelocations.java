@@ -10,6 +10,7 @@ import java.util.Set;
 
 final class NsoRelocations {
     static final int SYMBOL_ENTRY_SIZE = 24;
+    static final int AARCH64_RELATIVE = 1027;
     private static final int MAX_TYPE_ROWS = 24;
     private static final int MAX_IMPORT_SAMPLES = 16;
 
@@ -124,7 +125,7 @@ final class NsoRelocations {
             case 1024 -> "R_AARCH64_COPY";
             case 1025 -> "R_AARCH64_GLOB_DAT";
             case 1026 -> "R_AARCH64_JUMP_SLOT";
-            case 1027 -> "R_AARCH64_RELATIVE";
+            case AARCH64_RELATIVE -> "R_AARCH64_RELATIVE";
             case 1028 -> "R_AARCH64_TLS_IMPDEF1";
             case 1029 -> "R_AARCH64_TLS_IMPDEF2";
             case 1030 -> "R_AARCH64_TLS_TPREL";

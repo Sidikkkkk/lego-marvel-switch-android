@@ -169,6 +169,7 @@ public final class NsoHeaderTest {
         testStartupUnalignedBssSlots();
         testStartupDoublewordImmediateStores();
         testStartupRegisterBranchTable();
+        testStartupConditionalSet();
         System.out.println("NSO checks passed.");
     }
 
@@ -636,6 +637,30 @@ public final class NsoHeaderTest {
         rtld.putInt(0x118, 0x38676b0b).putInt(0x10c, 0x9102e718);
         require(startupReport(main, rtld).contains("LDRB W11, [X24, X7] @0x2000010c0 — jejak berhenti"),
                 "A register-offset byte load cannot read the gap past .rodata");
+    }
+
+    private static void testStartupConditionalSet() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xf100001f).putInt(0x10c, 0x1a9f17e4).putInt(0x110, 0x9a9f07e5)
+                .putInt(0x114, 0x54000040).putInt(0x11c, 0xf100041f)
+                .putInt(0x120, 0x9a9f27e6).putInt(0x124, 0x1a9f37e7);
+        String report = startupReport(main, rtld);
+        require(report.contains("CSET W4, EQ = 0x1")
+                && report.contains("CSET X5, NE = 0x0")
+                && report.contains("B.EQ → 0x20000001c (diambil)")
+                && report.contains("CSET X6, CC = 0x1")
+                && report.contains("CSET W7, CS = 0x0"),
+                "Conditional set decodes the inverted condition and preserves NZCV for the next branch");
+
+        rtld.putInt(0x108, 0x1a9f17e4);
+        report = startupReport(main, rtld);
+        require(report.contains("CSET W4, EQ = belum diketahui")
+                && report.contains("B.EQ → 0x20000001c — jejak berhenti, NZCV belum diketahui."),
+                "Conditional set propagates unknown flags without choosing a result");
+        rtld.putInt(0x108, 0x1a9fe7e4);
+        require(startupReport(main, rtld).contains("kata 0x1a9fe7e4 — jejak berhenti, instruksi di luar cakupan."),
+                "An unconditional CSINC encoding is not decoded as CSET");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

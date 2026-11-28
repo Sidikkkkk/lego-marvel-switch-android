@@ -446,6 +446,15 @@ final class NsoStartupProbe {
                         .append(", #0x").append(Long.toHexString(mask));
                 long value = and ? registers[source] & mask : registers[source] | mask;
                 writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL, known[source]);
+            } else if ((instruction & 0x7fff_0fe0) == 0x1a9f_07e0 && (instruction & 0xe000) != 0xe000) {
+                // CSET is CSINC with two zero registers and an inverted condition.
+                int condition = ((instruction >>> 12) & 15) ^ 1;
+                int destination = instruction & 31;
+                report.append("CSET ").append(zeroReg(destination, instruction < 0))
+                        .append(", ").append(CONDITIONS[condition]);
+                boolean flagsKnown = flags != null;
+                long value = flagsKnown && flags.holds(condition) ? 1 : 0;
+                writeRegister(report, registers, known, destination, value, flagsKnown);
             } else if ((instruction & 0x7fe0_fc00) == 0x1b00_7c00) {
                 boolean wide = instruction < 0;
                 int left = (instruction >>> 5) & 31;

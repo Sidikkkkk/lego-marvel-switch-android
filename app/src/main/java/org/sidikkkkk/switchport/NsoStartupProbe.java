@@ -9,7 +9,7 @@ final class NsoStartupProbe {
     private static final int BRANCH_MASK = 0xfc00_0000;
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
-    private static final int MAX_STEPS = 256;
+    private static final int MAX_STEPS = 1024;
     private static final int NEARBY_WORDS = 12;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};

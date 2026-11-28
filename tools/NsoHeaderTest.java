@@ -162,6 +162,7 @@ public final class NsoHeaderTest {
         testStartupDoublewordPairStores();
         testStartupUnscaledLoadCompare();
         testStartupPostIndexedLoad();
+        testStartupInstructionBudget();
         System.out.println("NSO checks passed.");
     }
 
@@ -469,6 +470,22 @@ public final class NsoHeaderTest {
         report = startupReport(main, rtld);
         require(report.contains("LDR X1, [X8], #16 @0x200001ff8 — jejak berhenti")
                 && !report.contains("0x200000014 LDR"), "A load in a segment gap stops before writeback");
+    }
+
+    private static void testStartupInstructionBudget() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0x52802581).putInt(0x10c, 0xd1000421).putInt(0x110, 0xb5ffffe1);
+        String report = startupReport(main, rtld);
+        require(report.lines().filter(line -> line.contains("0x200000010 CBNZ X1")).count() == 300
+                && report.contains("0x200000010 CBNZ X1 → 0x20000000c (tidak diambil)")
+                && report.contains("0x200000014 kata 0x0"), "A finite loop can finish after more than 256 steps");
+
+        rtld.putInt(0x108, 0x14000000);
+        report = startupReport(main, rtld);
+        require(report.lines().filter(line -> line.contains("0x200000008 B → 0x200000008")).count() == 1023
+                && report.contains("Jejak berhenti setelah 1024 instruksi.")
+                && report.contains("Kata .text mulai 0x200000008"), "The probe still limits an infinite loop");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

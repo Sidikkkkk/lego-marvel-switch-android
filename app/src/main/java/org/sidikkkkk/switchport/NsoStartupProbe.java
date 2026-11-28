@@ -160,18 +160,42 @@ final class NsoStartupProbe {
                 int destination = instruction & 31;
                 report.append("SXTW ").append(zeroReg(destination, true)).append(", ").append(zeroReg(source, false));
                 writeRegister(report, registers, known, destination, (int) registers[source], known[source]);
-            } else if ((instruction & 0xffe0_fc00) == 0x8b00_0000) {
+            } else if ((instruction & 0xbfe0_fc00) == 0x8b00_0000) {
                 int left = (instruction >>> 5) & 31;
                 int right = (instruction >>> 16) & 31;
                 int destination = instruction & 31;
-                long value = registers[left] + registers[right];
+                boolean subtract = (instruction & 0x4000_0000) != 0;
+                long value = subtract ? registers[left] - registers[right] : registers[left] + registers[right];
                 boolean valueKnown = known[left] && known[right];
-                report.append("ADD ").append(zeroReg(destination, true)).append(", ").append(zeroReg(left, true))
+                report.append(subtract ? "SUB " : "ADD ")
+                        .append(zeroReg(destination, true)).append(", ").append(zeroReg(left, true))
                         .append(", ").append(zeroReg(right, true));
                 writeRegister(report, registers, known, destination, value, valueKnown);
                 if (destination != 31 && valueKnown && bssEnd > bssStart && value == base + bssStart) {
                     report.append(" (awal .bss rtld)");
                 }
+            } else if ((instruction & 0x7f80_0000) == 0x5280_0000) {
+                boolean wide = instruction < 0;
+                int destination = instruction & 31;
+                int shift = ((instruction >>> 21) & 3) * 16;
+                report.append("MOVZ ").append(zeroReg(destination, wide));
+                if (!wide && shift >= 32) {
+                    report.append(" — jejak berhenti, encoding MOVZ W tidak valid.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long value = ((instruction >>> 5) & 0xffffL) << shift;
+                writeRegister(report, registers, known, destination, value, true);
+            } else if ((instruction & 0xffff_fc1f) == 0xd65f_0000) {
+                int source = (instruction >>> 5) & 31;
+                report.append("RET ").append(zeroReg(source, true));
+                if (!known[source]) {
+                    report.append(" — jejak berhenti, alamat balik belum diketahui.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                target = registers[source] - base;
+                report.append(" → 0x").append(Long.toHexString(registers[source]));
             } else {
                 report.append("kata 0x").append(Integer.toHexString(instruction))
                         .append(" — jejak berhenti, instruksi di luar cakupan.\n");
@@ -179,6 +203,10 @@ final class NsoStartupProbe {
                 return;
             }
             report.append('\n');
+            if ((target & 3) != 0) {
+                report.append("Jejak berhenti. Target tidak sejajar 4 byte.\n");
+                return;
+            }
             if (target < text.memoryOffset() || target > lastInstruction) {
                 report.append("Jejak berhenti. Target di luar .text rtld.\n");
                 return;
@@ -186,6 +214,7 @@ final class NsoStartupProbe {
             pc = target;
         }
         report.append("Jejak berhenti setelah ").append(MAX_STEPS).append(" instruksi.\n");
+        appendWords(report, data, pc, lastInstruction, base);
     }
 
     private static int immediate12(int instruction) {

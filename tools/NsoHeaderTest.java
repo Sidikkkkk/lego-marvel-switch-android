@@ -155,6 +155,7 @@ public final class NsoHeaderTest {
         testStartupTrace();
         testStartupRegisterSimulation();
         testStartupMemoryRead();
+        testStartupCalls();
         System.out.println("NSO checks passed.");
     }
 
@@ -288,6 +289,44 @@ public final class NsoHeaderTest {
         compareExportModule(rtld.putInt(0x118, 0x0fe0), audit, "rtld");
         require(audit.report().contains("@0x200000ff8 — jejak berhenti, alamat di luar rentang baca rtld yang sejajar"),
                 "A read in a gap between mapped segments must stop even if it fits in the backing array");
+    }
+
+    private static void testStartupCalls() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x91004002)
+                .putInt(0x114, 0xcb000042).putInt(0x118, 0x52800001).putInt(0x11c, 0x94000006)
+                .putInt(0x120, 0xd4000001).putInt(0x134, 0xd2e00024).putInt(0x138, 0xd65f03c0);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB X2, X2, X0 = 0x10")
+                && report.contains("MOVZ W1 = 0x0")
+                && report.contains("0x20000001c BL → 0x200000034 (X30 = 0x200000020)")
+                && report.contains("0x200000034 MOVZ X4 = 0x1000000000000")
+                && report.contains("0x200000038 RET X30 → 0x200000020")
+                && report.contains("0x200000020 kata 0xd4000001 — jejak berhenti"),
+                "Call arguments, shifted MOVZ, and return to the original continuation");
+
+        assertStartupStop(main, rtld, 0xd65f03c0, "RET X30 — jejak berhenti, alamat balik belum diketahui");
+        assertStartupStop(main, rtld, 0x52c00001, "encoding MOVZ W tidak valid");
+        rtld.putInt(0x108, 0x30000005).putInt(0x10c, 0xd65f00a0);
+        require(startupReport(main, rtld).contains("RET X5 → 0x200000009\nJejak berhenti. Target tidak sejajar 4 byte."),
+                "An unaligned return stops before an instruction fetch");
+        rtld.putInt(0x108, 0xd2800005);
+        require(startupReport(main, rtld).contains("RET X5 → 0x0\nJejak berhenti. Target di luar .text rtld."),
+                "A return outside the text segment stops before an instruction fetch");
+    }
+
+    private static void assertStartupStop(ByteBuffer main, ByteBuffer rtld, int instruction, String reason)
+            throws IOException {
+        String report = startupReport(main, rtld.putInt(0x108, instruction));
+        require(report.contains(reason) && !report.contains("0x20000000c ADD"), reason);
+    }
+
+    private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld, audit, "rtld");
+        return audit.report();
     }
 
     private static void testWeakGotSimulation() throws IOException {

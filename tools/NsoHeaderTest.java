@@ -149,7 +149,33 @@ public final class NsoHeaderTest {
                 .contains("#1 (nama tidak tersedia)"), "Invalid name index cannot escape the string table");
         testRelativeRelocations();
         testImportAudit();
+        testRelocationBoundaryEvidence();
         System.out.println("NSO checks passed.");
+    }
+
+    private static void testRelocationBoundaryEvidence() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        main.position(0x152).put("__rel_dyn_start\0".getBytes(StandardCharsets.US_ASCII));
+        main.put(0x184, (byte) 0x20).putLong(0x188, 0x11223344);
+        main.putLong(0x328, 0x21e0).putLong(0x338, -8);
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        String report = audit.report();
+        require(report.contains("Belum ada kandidat  1")
+                && report.contains("__rel_dyn_start #1 STB_WEAK (SHN_UNDEF, tipe 0, vis 0, st_value 0x11223344)")
+                && report.contains("2 referensi. Pertama RELA @0x2128 R_AARCH64_GLOB_DAT → 0x21e0, addend -8\n")
+                && report.contains("DT_REL tidak tercatat\n  DT_RELA [0x2110, 0x2140)\n  DT_JMPREL [0x2140, 0x2158)"),
+                "Report exposes the stored symbol and relocation facts without supplying a candidate");
+
+        main.position(0x152).put("__rel_plt_end\0".getBytes(StandardCharsets.US_ASCII));
+        main.put(0x184, (byte) 0x10).putLong(0x330, (2L << 32) | 1025);
+        main.putLong(0x278, 16).putLong(0x288, 17).putLong(0x340, 0x21e8);
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        require(audit.report().contains("__rel_plt_end #1 STB_GLOBAL")
+                && audit.report().contains("1 referensi. Pertama PLT REL @0x2140 R_AARCH64_JUMP_SLOT → 0x21e8\n")
+                && audit.report().contains("DT_JMPREL [0x2140, 0x2150)"),
+                "REL data does not contain an explicit addend");
     }
 
     private static void testImportAudit() throws IOException {

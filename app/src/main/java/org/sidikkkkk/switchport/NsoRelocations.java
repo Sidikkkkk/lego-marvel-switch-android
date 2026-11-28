@@ -17,9 +17,22 @@ final class NsoRelocations {
 
     record SymbolTable(long address, long count, long strings, long stringSize) {}
 
+    private static final class ImportUse {
+        final int firstEntry;
+        final int entrySize;
+        final String table;
+        long count = 1;
+
+        ImportUse(int firstEntry, int entrySize, String table) {
+            this.firstEntry = firstEntry;
+            this.entrySize = entrySize;
+            this.table = table;
+        }
+    }
+
     private final ByteBuffer data;
     private final SymbolTable symbols;
-    private final Map<Long, Long> importCounts;
+    private final Map<Long, ImportUse> importUses;
     private final Map<Integer, Long> types = new LinkedHashMap<>();
     private final Set<Long> imports = new LinkedHashSet<>();
     private long otherTypes;
@@ -30,15 +43,16 @@ final class NsoRelocations {
     NsoRelocations(ByteBuffer data, SymbolTable symbols, boolean captureImports) {
         this.data = data;
         this.symbols = symbols;
-        importCounts = captureImports ? new LinkedHashMap<>() : null;
+        importUses = captureImports ? new LinkedHashMap<>() : null;
     }
 
-    void scan(long address, long size, int entrySize) throws InterruptedIOException {
+    void scan(long address, long size, int entrySize, String table) throws InterruptedIOException {
         for (long offset = 0; offset < size; offset += entrySize) {
             if ((offset & 0xfff) == 0 && Thread.currentThread().isInterrupted()) {
                 throw new InterruptedIOException("Pemeriksaan relokasi dibatalkan.");
             }
-            long info = data.getLong((int) (address + offset) + Long.BYTES);
+            int entry = (int) (address + offset);
+            long info = data.getLong(entry + Long.BYTES);
             int type = (int) info;
             Long count = types.get(type);
             if (count != null) {
@@ -50,12 +64,12 @@ final class NsoRelocations {
             }
             long symbolIndex = info >>> 32;
             if (symbolIndex > 0) {
-                recordSymbol(symbolIndex);
+                recordSymbol(symbolIndex, entry, entrySize, table);
             }
         }
     }
 
-    private void recordSymbol(long index) {
+    private void recordSymbol(long index, int relocationEntry, int entrySize, String table) {
         ++symbolReferences;
         if (symbols == null) {
             return;
@@ -71,22 +85,60 @@ final class NsoRelocations {
             if (imports.size() < MAX_IMPORT_SAMPLES) {
                 imports.add(index);
             }
-            if (importCounts != null && (importCounts.size() < MAX_TRACKED_IMPORT_INDICES
-                    || importCounts.containsKey(index))) {
-                importCounts.merge(index, 1L, Long::sum);
+            if (importUses != null) {
+                ImportUse use = importUses.get(index);
+                if (use != null) {
+                    ++use.count;
+                } else if (importUses.size() < MAX_TRACKED_IMPORT_INDICES) {
+                    importUses.put(index, new ImportUse(relocationEntry, entrySize, table));
+                }
             }
         }
     }
 
     void captureImports(NsoImportAudit audit) throws InterruptedIOException {
-        for (var entry : importCounts.entrySet()) {
+        for (var entry : importUses.entrySet()) {
             int offset = (int) (symbols.address + entry.getKey() * SYMBOL_ENTRY_SIZE);
             String name = NsoImportAudit.exactName(data, symbols, offset);
             if (name != null) {
-                audit.addImport(name, entry.getValue());
+                ImportUse use = entry.getValue();
+                audit.addImport(name, use.count);
+                if (isRelocationBoundaryName(name)) {
+                    audit.addBoundaryEvidence(describeBoundary(name, entry.getKey(), offset, use));
+                }
             }
         }
         audit.finishImports(importReferences, invalidSymbolReferences);
+    }
+
+    private static boolean isRelocationBoundaryName(String name) {
+        return switch (name) {
+            case "__rel_dyn_start", "__rel_dyn_end", "__rel_plt_start", "__rel_plt_end" -> true;
+            default -> false;
+        };
+    }
+
+    private String describeBoundary(String name, long index, int symbol, ImportUse use) {
+        int info = data.get(symbol + 4) & 0xff;
+        String binding = switch (info >>> 4) {
+            case 0 -> "STB_LOCAL";
+            case 1 -> "STB_GLOBAL";
+            case 2 -> "STB_WEAK";
+            default -> "binding " + (info >>> 4);
+        };
+        int entry = use.firstEntry;
+        StringBuilder row = new StringBuilder("  ").append(name).append(" #").append(index)
+                .append(' ').append(binding).append(" (SHN_UNDEF, tipe ").append(info & 0xf)
+                .append(", vis ").append(data.get(symbol + 5) & 3).append(", st_value 0x")
+                .append(Long.toHexString(data.getLong(symbol + 8))).append(")\n")
+                .append("    ").append(use.count).append(" referensi. Pertama ").append(use.table)
+                .append(" @0x").append(Integer.toHexString(entry)).append(' ')
+                .append(typeName(data.getInt(entry + Long.BYTES)))
+                .append(" → 0x").append(Long.toHexString(data.getLong(entry)));
+        if (use.entrySize == 3 * Long.BYTES) {
+            row.append(", addend ").append(data.getLong(entry + 2 * Long.BYTES));
+        }
+        return row.append('\n').toString();
     }
 
     void appendReport(StringBuilder report) throws InterruptedIOException {

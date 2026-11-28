@@ -22,6 +22,8 @@ final class NsoImportAudit {
 
     private final Map<String, Long> imports = new LinkedHashMap<>();
     private final Map<String, List<String>> candidates = new LinkedHashMap<>();
+    private final StringBuilder boundaryEvidence = new StringBuilder();
+    private final StringBuilder tableRanges = new StringBuilder();
     private long references = -1;
     private long invalidReferences;
 
@@ -36,6 +38,25 @@ final class NsoImportAudit {
 
     boolean hasImports() {
         return references >= 0 && !imports.isEmpty();
+    }
+
+    void addBoundaryEvidence(String row) {
+        boundaryEvidence.append(row);
+    }
+
+    boolean hasBoundaryEvidence() {
+        return boundaryEvidence.length() != 0;
+    }
+
+    void addTableRange(String tag, long start, long size) {
+        tableRanges.append("  ").append(tag);
+        if (size > 0) {
+            tableRanges.append(" [0x").append(Long.toHexString(start))
+                    .append(", 0x").append(Long.toHexString(start + size)).append(')');
+        } else {
+            tableRanges.append(size == 0 ? "  0 byte" : " tidak tercatat");
+        }
+        tableRanges.append('\n');
     }
 
     int compareExports(String module, ByteBuffer data, NsoRelocations.SymbolTable symbols)
@@ -110,6 +131,10 @@ final class NsoImportAudit {
         if (ambiguous > 0) {
             output.append("Contoh nama dengan beberapa kandidat (maks. ").append(MAX_AMBIGUOUS_NAMES).append(")\n")
                     .append(ambiguousExamples);
+        }
+        if (hasBoundaryEvidence()) {
+            output.append("\nDetail simbol __rel_ di main\n").append(boundaryEvidence)
+                    .append("Rentang tabel relokasi main (offset)\n").append(tableRanges);
         }
         return output.toString();
     }

@@ -1,5 +1,6 @@
 package org.sidikkkkk.switchport;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -147,7 +148,47 @@ public final class NsoHeaderTest {
         require(inspectMetadata(relocationFixture().putInt(0x180, -1))
                 .contains("#1 (nama tidak tersedia)"), "Invalid name index cannot escape the string table");
         testRelativeRelocations();
+        testImportAudit();
         System.out.println("NSO checks passed.");
+    }
+
+    private static void testImportAudit() throws IOException {
+        NsoImportAudit audit = new NsoImportAudit();
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        String mainReport = NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(),
+                0x2220, audit);
+        require(mainReport.contains("1 entri diterapkan ke buffer RAM.") && audit.hasImports(),
+                "Folder scan keeps the relative simulation and collects imports");
+        require(audit.report().contains("Referensi impor main  2\nNama impor unik diperiksa  1"),
+                "Repeated references count separately from unique names");
+        require(audit.report().contains("Belum ada kandidat  1") && audit.report().contains("  imp_func\n"),
+                "Missing name is visible before any matches");
+
+        ByteBuffer provider = relocationFixture();
+        provider.put(0x184, (byte) 0x12).putShort(0x186, (short) 1); // Global function.
+        provider.putInt(0x198, 18).put(0x19c, (byte) 0x12); // Duplicate export in the same file.
+        require(compareExportModule(provider, audit, "subsdk0").equals("1 nama impor cocok.")
+                && audit.report().contains("Satu kandidat  1\nBeberapa kandidat  0"),
+                "One module is counted once per name");
+
+        provider.put(0x184, (byte) 0x22).put(0x185, (byte) 3); // Weak and protected.
+        require(compareExportModule(provider, audit, "sdk").equals("1 nama impor cocok.")
+                && audit.report().contains("Satu kandidat  0\nBeberapa kandidat  1")
+                && audit.report().contains("imp_func → subsdk0, sdk"), "Multiple candidates are reported");
+
+        provider.put(0x185, (byte) 2).put(0x19c, (byte) 0x02); // Hidden and local.
+        require(compareExportModule(provider, audit, "hidden").equals("0 nama impor cocok."),
+                "Hidden and local definitions are excluded");
+        provider.put(0x185, (byte) 0).putShort(0x186, (short) 0);
+        require(compareExportModule(provider, audit, "undefined").equals("0 nama impor cocok."),
+                "A visible undefined symbol is not an export");
+        provider.putShort(0x186, (short) 1).put(0x158, (byte) 1);
+        require(compareExportModule(provider, audit, "bad-name").equals("0 nama impor cocok."),
+                "A longer or malformed name cannot match an import prefix");
+        require(compareExportModule(provider.putLong(0x2f8, 0x5000).putInt(0x9c, 0), audit, "bad-table")
+                .contains("belum terverifikasi"), "An unverified table is distinguished from zero matches");
+        require(compareExportModule(ByteBuffer.allocate(4), audit, "main.npdm") == null,
+                "Non-NSO siblings are skipped");
     }
 
     private static void testRelativeRelocations() throws IOException {
@@ -271,6 +312,12 @@ public final class NsoHeaderTest {
 
     private static NsoHeader.Inspection inspectRelative(ByteBuffer module) throws IOException {
         return NsoHeader.inspectWithRelativeTest(new ByteArrayInputStream(module.array()), module.capacity(), 0x2220);
+    }
+
+    private static String compareExportModule(ByteBuffer module, NsoImportAudit audit, String name)
+            throws IOException {
+        return NsoHeader.inspectExportModule(new BufferedInputStream(new ByteArrayInputStream(module.array())),
+                module.capacity(), 0x2220, audit, name);
     }
 
     private static void expectMetadataError(ByteBuffer module, String detail) throws IOException {

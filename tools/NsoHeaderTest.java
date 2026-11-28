@@ -160,6 +160,7 @@ public final class NsoHeaderTest {
         testStartupWordStores();
         testStartupPairStores();
         testStartupDoublewordPairStores();
+        testStartupUnscaledLoadCompare();
         System.out.println("NSO checks passed.");
     }
 
@@ -412,6 +413,37 @@ public final class NsoHeaderTest {
                 && report.contains("LDR X4, [X0, #0x18] @0x200002218 = 0x1234")
                 && report.contains("STP X1, X2, [X8, #0] @0x200002218 — jejak berhenti, alamat simpan di luar .bss rtld."),
                 "BFI preserves low bits, pair stores retain high bits, and the full 16-byte range is checked");
+    }
+
+    private static void testStartupUnscaledLoadCompare() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2c0002d).putInt(0x10c, 0x728acf0d).putInt(0x110, 0x72a2468d)
+                .putInt(0x114, 0xd0000008).putInt(0x118, 0x9107e108).putInt(0x11c, 0xf85f8110)
+                .putInt(0x120, 0xeb0d021f).putInt(0x124, 0x5400004d);
+        rtld.putLong(0x3f0, 0x12345678L);
+        String report = startupReport(main, rtld);
+        require(report.contains("MOVK W13 = 0x12345678")
+                && report.contains("LDUR X16, [X8, #-8] @0x2000021f0 = 0x12345678")
+                && report.contains("CMP X16, X13 (NZCV = 0x6)")
+                && report.contains("B.LE → 0x20000002c (diambil)"),
+                "MOVK keeps low bits while a W write clears high bits, and a signed load can set branch flags");
+
+        rtld.putLong(0x3f0, 0x12345679L);
+        require(startupReport(main, rtld).contains("B.LE → 0x20000002c (tidak diambil)"),
+                "Signed branch does not take the less-or-equal path for a greater value");
+        rtld.putLong(0x3f0, Long.MIN_VALUE);
+        report = startupReport(main, rtld);
+        require(report.contains("CMP X16, X13 (NZCV = 0x3)")
+                && report.contains("B.LE → 0x20000002c (diambil)"), "Signed compare branch accounts for overflow");
+
+        rtld.putInt(0x118, 0x9103e108).putInt(0x11c, 0xf8500110);
+        require(startupReport(main, rtld).contains("LDUR X16, [X8, #-256] @0x200001ff8 — jejak berhenti"),
+                "An unscaled load in the gap before .data is rejected");
+        assertStartupStop(main, rtld, 0x72c0000d, "encoding MOVK W tidak valid");
+        assertStartupStop(main, rtld, 0xeb0103ff, "CMP XZR, X1 — jejak berhenti, nilai register belum diketahui");
+        require(startupReport(main, rtld.putInt(0x108, 0x72800001)).contains("MOVK W1 = belum diketahui"),
+                "MOVK cannot infer the bits it preserves from an unknown register");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

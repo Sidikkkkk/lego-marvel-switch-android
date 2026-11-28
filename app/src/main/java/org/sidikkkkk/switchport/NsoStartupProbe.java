@@ -9,7 +9,7 @@ final class NsoStartupProbe {
     private static final int BRANCH_MASK = 0xfc00_0000;
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
-    private static final int MAX_STEPS = 128;
+    private static final int MAX_STEPS = 256;
     private static final int NEARBY_WORDS = 12;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};
@@ -63,7 +63,9 @@ final class NsoStartupProbe {
         for (int step = 0; step < MAX_STEPS; ++step) {
             int instruction = data.getInt((int) pc);
             int opcode = instruction & BRANCH_MASK;
-            int logicalOpcode = instruction & 0x7f80_0000;
+            int opcodeWithoutSf = instruction & 0x7f80_0000;
+            boolean registerCompare = (instruction & 0xffe0_fc1f) == 0xeb00_001f;
+            boolean unscaledLoad = (instruction & 0xbfe0_0c00) == 0xb840_0000;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
             boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
             boolean pairStore = (instruction & 0x7fc0_0000) == 0x2900_0000;
@@ -79,16 +81,27 @@ final class NsoStartupProbe {
                     known[30] = true;
                     report.append(" (X30 = 0x").append(Long.toHexString(registers[30])).append(')');
                 }
-            } else if ((instruction & 0xff80_001f) == 0xf100_001f) {
+            } else if (registerCompare || (instruction & 0xff80_001f) == 0xf100_001f) {
                 int source = (instruction >>> 5) & 31;
-                int immediate = immediate12(instruction);
-                report.append("CMP ").append(reg(source)).append(", #0x").append(Integer.toHexString(immediate));
-                if (source == 31 || !known[source]) {
+                long right;
+                boolean operandsKnown;
+                if (registerCompare) {
+                    int secondSource = (instruction >>> 16) & 31;
+                    report.append("CMP ").append(zeroReg(source, true)).append(", ").append(zeroReg(secondSource, true));
+                    right = registers[secondSource];
+                    operandsKnown = known[source] && known[secondSource];
+                } else {
+                    int immediate = immediate12(instruction);
+                    report.append("CMP ").append(reg(source)).append(", #0x").append(Integer.toHexString(immediate));
+                    right = immediate;
+                    operandsKnown = source != 31 && known[source];
+                }
+                if (!operandsKnown) {
                     report.append(" — jejak berhenti, nilai register belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                flags = Flags.subtract(registers[source], immediate);
+                flags = Flags.subtract(registers[source], right);
                 report.append(" (NZCV = 0x").append(Integer.toHexString(flags.nzcv())).append(')');
             } else if ((instruction & 0xff00_0010) == 0x5400_0000) {
                 int condition = instruction & 15;
@@ -157,14 +170,16 @@ final class NsoStartupProbe {
                 long value = wide ? registers[source] : registers[source] & 0xffff_ffffL;
                 report.append("MOV ").append(zeroReg(destination, wide)).append(", ").append(zeroReg(source, wide));
                 writeRegister(report, registers, known, destination, value, known[source]);
-            } else if ((instruction & 0xbfc0_0000) == 0xb940_0000) {
+            } else if (unscaledLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
                 boolean wide = (instruction & 0x4000_0000) != 0;
                 int size = wide ? Long.BYTES : Integer.BYTES;
-                long byteOffset = ((instruction >>> 10) & 0xfff) * size;
-                report.append("LDR ").append(zeroReg(destination, wide)).append(", [").append(reg(source))
-                        .append(", #0x").append(Long.toHexString(byteOffset)).append(']');
+                int byteOffset = unscaledLoad ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                report.append(unscaledLoad ? "LDUR " : "LDR ").append(zeroReg(destination, wide)).append(", [")
+                        .append(reg(source)).append(", #")
+                        .append(unscaledLoad ? Integer.toString(byteOffset) : "0x" + Integer.toHexString(byteOffset))
+                        .append(']');
                 if (source == 31 || !known[source]) {
                     report.append(" — jejak berhenti, register alamat belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
@@ -281,9 +296,9 @@ final class NsoStartupProbe {
                 if (wide && destination != 31 && valueKnown && bssEnd > bssStart && value == base + bssStart) {
                     report.append(" (awal .bss rtld)");
                 }
-            } else if (logicalOpcode == 0x1200_0000 || logicalOpcode == 0x3200_0000) {
+            } else if (opcodeWithoutSf == 0x1200_0000 || opcodeWithoutSf == 0x3200_0000) {
                 boolean wide = instruction < 0;
-                boolean and = logicalOpcode == 0x1200_0000;
+                boolean and = opcodeWithoutSf == 0x1200_0000;
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
                 report.append(and ? "AND " : "ORR ");
@@ -308,18 +323,24 @@ final class NsoStartupProbe {
                 long value = registers[left] * registers[right];
                 writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL,
                         known[left] && known[right]);
-            } else if ((instruction & 0x7f80_0000) == 0x5280_0000) {
+            } else if (opcodeWithoutSf == 0x5280_0000 || opcodeWithoutSf == 0x7280_0000) {
                 boolean wide = instruction < 0;
+                boolean keep = opcodeWithoutSf == 0x7280_0000;
+                String mnemonic = keep ? "MOVK" : "MOVZ";
                 int destination = instruction & 31;
                 int shift = ((instruction >>> 21) & 3) * 16;
-                report.append("MOVZ ").append(zeroReg(destination, wide));
+                report.append(mnemonic).append(' ').append(zeroReg(destination, wide));
                 if (!wide && shift >= 32) {
-                    report.append(" — jejak berhenti, encoding MOVZ W tidak valid.\n");
+                    report.append(" — jejak berhenti, encoding ").append(mnemonic).append(" W tidak valid.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
                 long value = ((instruction >>> 5) & 0xffffL) << shift;
-                writeRegister(report, registers, known, destination, value, true);
+                if (keep) {
+                    value |= registers[destination] & ~(0xffffL << shift);
+                }
+                writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL,
+                        !keep || known[destination]);
             } else if ((instruction & 0xffff_fc1f) == 0xd65f_0000) {
                 int source = (instruction >>> 5) & 31;
                 report.append("RET ").append(zeroReg(source, true));

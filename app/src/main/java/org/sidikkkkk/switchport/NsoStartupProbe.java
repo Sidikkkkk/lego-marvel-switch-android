@@ -9,7 +9,7 @@ final class NsoStartupProbe {
     private static final int BRANCH_MASK = 0xfc00_0000;
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
-    private static final int MAX_STEPS = 48;
+    private static final int MAX_STEPS = 96;
     private static final int NEARBY_WORDS = 12;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};
@@ -66,6 +66,7 @@ final class NsoStartupProbe {
             int logicalOpcode = instruction & 0x7f80_0000;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
             boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
+            boolean pairStore = (instruction & 0xffc0_0000) == 0x2900_0000;
             long address = base + pc;
             long target = pc + Integer.BYTES;
             report.append("  0x").append(Long.toHexString(address)).append(' ');
@@ -189,24 +190,35 @@ final class NsoStartupProbe {
                 }
                 report.append(" @0x").append(Long.toHexString(loadAddress));
                 writeRegister(report, registers, known, destination, value, true);
-            } else if (unsignedStore || unscaledStore) {
-                int size = instruction < 0 ? Integer.BYTES : 1;
+            } else if (unsignedStore || unscaledStore || pairStore) {
+                int size = pairStore || instruction < 0 ? Integer.BYTES : 1;
                 int source = instruction & 31;
+                int secondSource = (instruction >>> 10) & 31;
                 int addressRegister = (instruction >>> 5) & 31;
-                int encodedOffset = (instruction >>> 12) & 0x1ff;
-                int immediate = unscaledStore ? (encodedOffset << 23) >> 23 : ((instruction >>> 10) & 0xfff) * size;
-                report.append(unscaledStore ? "STUR" : "STR").append(size == 1 ? "B " : " ")
-                        .append(zeroReg(source, false)).append(", [")
-                        .append(reg(addressRegister)).append(", #").append(immediate).append(']');
-                if (addressRegister == 31 || !known[addressRegister] || !known[source]) {
+                int immediate;
+                if (pairStore) {
+                    int scaledOffset = (instruction << 10) >> 25; // Signed imm7 in bits 21:15.
+                    immediate = scaledOffset * size;
+                    report.append("STP ").append(zeroReg(source, false)).append(", ")
+                            .append(zeroReg(secondSource, false));
+                } else {
+                    int encodedOffset = (instruction >>> 12) & 0x1ff;
+                    immediate = unscaledStore ? (encodedOffset << 23) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                    report.append(unscaledStore ? "STUR" : "STR").append(size == 1 ? "B " : " ")
+                            .append(zeroReg(source, false));
+                }
+                report.append(", [").append(reg(addressRegister)).append(", #").append(immediate).append(']');
+                if (addressRegister == 31 || !known[addressRegister] || !known[source]
+                        || (pairStore && !known[secondSource])) {
                     report.append(" — jejak berhenti, nilai atau alamat simpan belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
                 long storeAddress = registers[addressRegister] + immediate;
                 long offset = storeAddress - base;
+                int totalSize = pairStore ? 2 * size : size;
                 report.append(" @0x").append(Long.toHexString(storeAddress));
-                if (storeAddress < base || offset < bssStart || offset > bssEnd - size) {
+                if (storeAddress < base || offset < bssStart || offset > bssEnd - totalSize) {
                     report.append(" — jejak berhenti, alamat simpan di luar .bss rtld.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
@@ -216,11 +228,13 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long stored = registers[source] & (size == 1 ? 0xffL : 0xffff_ffffL);
-                for (int index = 0; index < size; ++index) {
-                    bssWrites.put(offset + index, (byte) (stored >>> (Byte.SIZE * index)));
+                report.append(" = 0x");
+                appendStoreValue(report, bssWrites, offset, registers[source], size);
+                if (pairStore) {
+                    report.append(", 0x");
+                    appendStoreValue(report, bssWrites, offset + size, registers[secondSource], size);
                 }
-                report.append(" = 0x").append(Long.toHexString(stored)).append(" (.bss simulasi)");
+                report.append(" (.bss simulasi)");
             } else if ((instruction & 0xffff_fc00) == 0x9340_7c00) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
@@ -312,6 +326,15 @@ final class NsoStartupProbe {
         }
         report.append("Jejak berhenti setelah ").append(MAX_STEPS).append(" instruksi.\n");
         appendWords(report, data, pc, lastInstruction, base);
+    }
+
+    private static void appendStoreValue(StringBuilder report, Map<Long, Byte> bssWrites,
+                                         long offset, long value, int size) {
+        long stored = value & (size == 1 ? 0xffL : 0xffff_ffffL);
+        for (int index = 0; index < size; ++index) {
+            bssWrites.put(offset + index, (byte) (stored >>> (Byte.SIZE * index)));
+        }
+        report.append(Long.toHexString(stored));
     }
 
     private static int immediate12(int instruction) {

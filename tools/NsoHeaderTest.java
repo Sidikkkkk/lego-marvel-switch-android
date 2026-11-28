@@ -158,6 +158,7 @@ public final class NsoHeaderTest {
         testStartupCalls();
         testStartupByteStores();
         testStartupWordStores();
+        testStartupPairStores();
         System.out.println("NSO checks passed.");
     }
 
@@ -373,6 +374,26 @@ public final class NsoHeaderTest {
         rtld.putInt(0x11c, 0x3200c3ff);
         require(startupReport(main, rtld).contains("ORR — jejak berhenti, SP belum dapat dimodelkan."),
                 "A logical immediate with Rd 31 writes SP rather than the zero register");
+    }
+
+    private static void testStartupPairStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x91001008)
+                .putInt(0x114, 0x528014a1).putInt(0x118, 0x52824682)
+                .putInt(0x11c, 0x293f8901).putInt(0x120, 0xf9400003).putInt(0x124, 0x29038801);
+        String report = startupReport(main, rtld);
+        require(report.contains("STP W1, W2, [X8, #-4] @0x200002200 = 0xa5, 0x1234 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x0] @0x200002200 = 0x1234000000a5")
+                && report.contains("STP W1, W2, [X0, #28] @0x20000221c — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Signed pair offset, little-endian word order, and range check of both words");
+
+        rtld.putInt(0x11c, 0x293f9501);
+        require(startupReport(main, rtld).contains("STP W1, W5, [X8, #-4] — jejak berhenti, nilai atau alamat simpan belum diketahui."),
+                "The second source register must be known");
+        rtld.putInt(0x11c, 0x29808901);
+        require(startupReport(main, rtld).contains("kata 0x29808901 — jejak berhenti, instruksi di luar cakupan."),
+                "Pair stores with writeback remain unsupported");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

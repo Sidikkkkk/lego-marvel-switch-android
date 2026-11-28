@@ -3,21 +3,29 @@ package org.sidikkkkk.switchport;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 final class NsoRelocations {
     static final int SYMBOL_ENTRY_SIZE = 24;
     static final int AARCH64_RELATIVE = 1027;
-    private static final int AARCH64_GLOB_DAT = 1025;
+    static final int AARCH64_ABS64 = 257;
+    static final int AARCH64_GLOB_DAT = 1025;
+    static final int AARCH64_JUMP_SLOT = 1026;
+    private static final int STB_GLOBAL = 1;
     private static final int STB_WEAK = 2;
+    private static final int STT_FUNC = 2;
     private static final int MAX_TYPE_ROWS = 24;
     private static final int MAX_IMPORT_SAMPLES = 16;
     private static final int MAX_TRACKED_IMPORT_INDICES = 4096;
+    private static final int MAX_CAPTURED_RELA_REFERENCES = 16384;
 
     record SymbolTable(long address, long count, long strings, long stringSize) {}
+    private record ImportRela(long index, int entry) {}
 
     private static final class ImportUse {
         final int firstEntry;
@@ -35,6 +43,7 @@ final class NsoRelocations {
     private final ByteBuffer data;
     private final SymbolTable symbols;
     private final Map<Long, ImportUse> importUses;
+    private final List<ImportRela> importRela;
     private final Map<Integer, Long> types = new LinkedHashMap<>();
     private final Set<Long> imports = new LinkedHashSet<>();
     private long otherTypes;
@@ -46,6 +55,7 @@ final class NsoRelocations {
         this.data = data;
         this.symbols = symbols;
         importUses = captureImports ? new LinkedHashMap<>() : null;
+        importRela = captureImports ? new ArrayList<>() : null;
     }
 
     void scan(long address, long size, int entrySize, String table) throws InterruptedIOException {
@@ -93,22 +103,48 @@ final class NsoRelocations {
                     ++use.count;
                 } else if (importUses.size() < MAX_TRACKED_IMPORT_INDICES) {
                     importUses.put(index, new ImportUse(relocationEntry, entrySize, table));
+                } else {
+                    return;
+                }
+                if (entrySize == 3 * Long.BYTES && importRela.size() < MAX_CAPTURED_RELA_REFERENCES) {
+                    importRela.add(new ImportRela(index, relocationEntry));
                 }
             }
         }
     }
 
     void captureImports(NsoImportAudit audit, NsoHeader.Segment writableData) throws InterruptedIOException {
+        Map<Long, String> names = new LinkedHashMap<>();
         for (var entry : importUses.entrySet()) {
             int offset = (int) (symbols.address + entry.getKey() * SYMBOL_ENTRY_SIZE);
             String name = NsoImportAudit.exactName(data, symbols, offset);
             if (name != null) {
+                names.put(entry.getKey(), name);
                 ImportUse use = entry.getValue();
                 audit.addImport(name, use.count);
                 if (isRelocationBoundaryName(name)) {
                     audit.addBoundaryEvidence(describeBoundary(name, entry.getKey(), offset, use));
                     captureWeakSlot(audit, name, offset, use, writableData);
                 }
+            }
+        }
+        for (ImportRela reference : importRela) {
+            String name = names.get(reference.index());
+            if (name == null) {
+                continue;
+            }
+            int entry = reference.entry();
+            int type = data.getInt(entry + Long.BYTES);
+            long target = data.getLong(entry);
+            long addend = data.getLong(entry + 2 * Long.BYTES);
+            int symbol = (int) (symbols.address + reference.index() * SYMBOL_ENTRY_SIZE);
+            int attributes = data.get(symbol + 4) & 0xff;
+            int binding = attributes >>> 4;
+            if ((binding == STB_GLOBAL || binding == STB_WEAK) && (attributes & 0xf) <= STT_FUNC
+                    && data.get(symbol + 5) == 0
+                    && (type == AARCH64_ABS64 || type == AARCH64_GLOB_DAT || (type == AARCH64_JUMP_SLOT && addend == 0))
+                    && alignedDataSlot(target, writableData)) {
+                audit.addBindingSlot(name, target, type, addend, data.getLong((int) target));
             }
         }
         audit.finishImports(importReferences, invalidSymbolReferences);
@@ -123,10 +159,14 @@ final class NsoRelocations {
             return;
         }
         long target = data.getLong(entry);
-        if ((target & (Long.BYTES - 1)) == 0 && target >= writableData.memoryOffset()
-                && target <= writableData.memoryEnd() - Long.BYTES) {
+        if (alignedDataSlot(target, writableData)) {
             audit.addWeakSlot(name, target, data.getLong((int) target));
         }
+    }
+
+    private static boolean alignedDataSlot(long target, NsoHeader.Segment writableData) {
+        return (target & (Long.BYTES - 1)) == 0 && target >= writableData.memoryOffset()
+                && target <= writableData.memoryEnd() - Long.BYTES;
     }
 
     private static boolean isRelocationBoundaryName(String name) {
@@ -140,7 +180,7 @@ final class NsoRelocations {
         int info = data.get(symbol + 4) & 0xff;
         String binding = switch (info >>> 4) {
             case 0 -> "STB_LOCAL";
-            case 1 -> "STB_GLOBAL";
+            case STB_GLOBAL -> "STB_GLOBAL";
             case STB_WEAK -> "STB_WEAK";
             default -> "binding " + (info >>> 4);
         };
@@ -208,11 +248,11 @@ final class NsoRelocations {
     private static String typeName(int type) {
         return switch (type) {
             case 0 -> "R_AARCH64_NONE";
-            case 257 -> "R_AARCH64_ABS64";
+            case AARCH64_ABS64 -> "R_AARCH64_ABS64";
             case 580 -> "R_AARCH64_AUTH_ABS64";
             case 1024 -> "R_AARCH64_COPY";
             case AARCH64_GLOB_DAT -> "R_AARCH64_GLOB_DAT";
-            case 1026 -> "R_AARCH64_JUMP_SLOT";
+            case AARCH64_JUMP_SLOT -> "R_AARCH64_JUMP_SLOT";
             case AARCH64_RELATIVE -> "R_AARCH64_RELATIVE";
             case 1028 -> "R_AARCH64_TLS_IMPDEF1";
             case 1029 -> "R_AARCH64_TLS_IMPDEF2";

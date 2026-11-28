@@ -75,7 +75,8 @@ final class NsoDynamic {
                         audit.noteExportScanFailure();
                         return "Batas .dynsym atau .dynstr belum terverifikasi.";
                     }
-                    return audit.compareExports(exportModule, data, symbols) + " nama impor cocok.";
+                    return audit.compareExports(exportModule, data, symbols, segments, bssStart, bssEnd)
+                            + " nama impor cocok.";
                 }
                 StringBuilder report = new StringBuilder("Metadata pemuatan MOD0\n")
                         .append("MOD0 0x").append(Long.toHexString(mod0))
@@ -303,7 +304,7 @@ final class NsoDynamic {
         return end;
     }
 
-    private static long regionEnd(NsoHeader.Segment[] segments, long offset, long length) {
+    static long regionEnd(NsoHeader.Segment[] segments, long offset, long length) {
         if (offset < 0 || length <= 0) {
             return -1;
         }

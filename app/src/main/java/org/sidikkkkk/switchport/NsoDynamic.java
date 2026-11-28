@@ -41,12 +41,18 @@ final class NsoDynamic {
                            long bssStart, long bssEnd, NsoImportAudit audit, String exportModule) throws IOException {
         NsoHeader.Segment text = segments[0];
         if (text.unpackedSize() < 8) {
+            if (exportModule != null) {
+                audit.noteExportScanFailure();
+            }
             return "MOD0 tidak terdeteksi pada awalan .text." + (exportModule == null ? "\n" : "");
         }
         ByteBuffer data = image.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         long mod0 = text.memoryOffset()
                 + Integer.toUnsignedLong(data.getInt((int) text.memoryOffset() + 4));
         if (regionEnd(segments, mod0, Integer.BYTES) < 0 || data.getInt((int) mod0) != MOD0_MAGIC) {
+            if (exportModule != null) {
+                audit.noteExportScanFailure();
+            }
             return "MOD0 tidak terdeteksi pada offset dari awalan .text." + (exportModule == null ? "\n" : "");
         }
         if (regionEnd(segments, mod0, MOD0_HEADER_SIZE) < 0) {
@@ -66,6 +72,7 @@ final class NsoDynamic {
                 NsoRelocations.SymbolTable symbols = symbolTable(data, segments, tags, symbolOffset, symbolSize);
                 if (exportModule != null) {
                     if (symbols == null) {
+                        audit.noteExportScanFailure();
                         return "Batas .dynsym atau .dynstr belum terverifikasi.";
                     }
                     return audit.compareExports(exportModule, data, symbols) + " nama impor cocok.";
@@ -79,7 +86,7 @@ final class NsoDynamic {
                 appendRelocations(report, segments, tags, relocations);
                 relocations.appendReport(report);
                 if (audit != null && symbols != null) {
-                    relocations.captureImports(audit);
+                    relocations.captureImports(audit, segments[2]);
                     if (audit.hasBoundaryEvidence()) {
                         // appendRelocations validated these byte ranges before collecting the evidence.
                         audit.addTableRange("DT_REL", tags[DT_REL], tags[DT_RELSZ]);

@@ -150,7 +150,39 @@ public final class NsoHeaderTest {
         testRelativeRelocations();
         testImportAudit();
         testRelocationBoundaryEvidence();
+        testWeakGotSimulation();
         System.out.println("NSO checks passed.");
+    }
+
+    private static void testWeakGotSimulation() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        main.position(0x152).put("__rel_dyn_start\0".getBytes(StandardCharsets.US_ASCII));
+        main.put(0x184, (byte) 0x20).putLong(0x328, 0x21e0).putLong(0x348, (2L << 32) | 1026);
+        main.putLong(0x3e0, 0x123456789abcdefL);
+        ByteBuffer provider = relocationFixture();
+        provider.position(0x152).put("__rel_dyn_start\0".getBytes(StandardCharsets.US_ASCII));
+
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        require(audit.report().contains("Pemindaian ekspor modul belum lengkap"), "No module means no test");
+        compareExportModule(provider, audit, "sdk");
+        require(audit.report().contains("__rel_dyn_start @0x21e0  0x123456789abcdef → 0x0\n1 slot diuji.")
+                && main.getLong(0x3e0) == 0x123456789abcdefL, "Weak fallback changes only the slot copy");
+
+        provider.put(0x184, (byte) 0x11).putShort(0x186, (short) 1);
+        compareExportModule(provider, audit, "subsdk0");
+        require(audit.report().contains("0 slot diuji.") && !audit.report().contains("@0x21e0  0x"),
+                "Do not simulate zero when there is a provider");
+        audit.noteExportScanFailure();
+        require(audit.report().contains("Pemindaian ekspor modul belum lengkap"), "Do not use a partial scan");
+
+        provider.putShort(0x186, (short) 0);
+        main.putLong(0x328, 0x21e1);
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(provider, audit, "sdk");
+        require(!audit.report().contains("slot diuji.") && audit.report().contains("Uji dilewati."),
+                "An unaligned slot is never read or simulated");
     }
 
     private static void testRelocationBoundaryEvidence() throws IOException {

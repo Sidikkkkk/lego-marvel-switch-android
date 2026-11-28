@@ -134,6 +134,7 @@ public final class MainActivity extends Activity {
                 } catch (InterruptedIOException error) {
                     throw error;
                 } catch (IOException | SecurityException | IllegalArgumentException error) {
+                    audit.noteExportScanFailure();
                     moduleReport.append(module.name()).append("  Gagal diperiksa. ")
                             .append(errorMessage(error)).append('\n');
                 }

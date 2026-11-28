@@ -155,6 +155,23 @@ public final class NsoHeaderTest {
         testStartupTrace();
         testStartupRegisterSimulation();
         testStartupMemoryRead();
+        testStartupCalls();
+        testStartupByteStores();
+        testStartupWordStores();
+        testStartupPairStores();
+        testStartupDoublewordPairStores();
+        testStartupUnscaledLoadCompare();
+        testStartupPostIndexedLoad();
+        testStartupInstructionBudget();
+        testStartupWordImmediateCompare();
+        testStartupRegisterOffsetStore();
+        testStartupStackFrame();
+        testStartupUnalignedBssSlots();
+        testStartupDoublewordImmediateStores();
+        testStartupRegisterBranchTable();
+        testStartupConditionalSet();
+        testStartupStackReturn();
+        testStartupInstructionWindow();
         System.out.println("NSO checks passed.");
     }
 
@@ -288,6 +305,419 @@ public final class NsoHeaderTest {
         compareExportModule(rtld.putInt(0x118, 0x0fe0), audit, "rtld");
         require(audit.report().contains("@0x200000ff8 — jejak berhenti, alamat di luar rentang baca rtld yang sejajar"),
                 "A read in a gap between mapped segments must stop even if it fits in the backing array");
+    }
+
+    private static void testStartupCalls() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x91004002)
+                .putInt(0x114, 0xcb000042).putInt(0x118, 0x52800001).putInt(0x11c, 0x94000006)
+                .putInt(0x120, 0xd4000001).putInt(0x134, 0xd2e00024).putInt(0x138, 0xd65f03c0);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB X2, X2, X0 = 0x10")
+                && report.contains("MOVZ W1 = 0x0")
+                && report.contains("0x20000001c BL → 0x200000034 (X30 = 0x200000020)")
+                && report.contains("0x200000034 MOVZ X4 = 0x1000000000000")
+                && report.contains("0x200000038 RET X30 → 0x200000020")
+                && report.contains("0x200000020 kata 0xd4000001 — jejak berhenti"),
+                "Call arguments, shifted MOVZ, and return to the original continuation");
+
+        assertStartupStop(main, rtld, 0xd65f03c0, "RET X30 — jejak berhenti, alamat balik belum diketahui");
+        assertStartupStop(main, rtld, 0x52c00001, "encoding MOVZ W tidak valid");
+        rtld.putInt(0x108, 0x30000005).putInt(0x10c, 0xd65f00a0);
+        require(startupReport(main, rtld).contains("RET X5 → 0x200000009\nJejak berhenti. Target tidak sejajar 4 byte."),
+                "An unaligned return stops before an instruction fetch");
+        rtld.putInt(0x108, 0xd2800005);
+        require(startupReport(main, rtld).contains("RET X5 → 0x0\nJejak berhenti. Target di luar .text rtld."),
+                "A return outside the text segment stops before an instruction fetch");
+    }
+
+    private static void assertStartupStop(ByteBuffer main, ByteBuffer rtld, int instruction, String reason)
+            throws IOException {
+        String report = startupReport(main, rtld.putInt(0x108, instruction));
+        require(report.contains(reason) && !report.contains("0x20000000c ADD"), reason);
+    }
+
+    private static void testStartupByteStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0x528014a1).putInt(0x10c, 0xb4000061).putInt(0x110, 0x35000041)
+                .putInt(0x118, 0xd0000000).putInt(0x11c, 0x91080000).putInt(0x120, 0x39000401)
+                .putInt(0x124, 0x91002008).putInt(0x128, 0x381ff101).putInt(0x12c, 0xf9400002)
+                .putInt(0x130, 0x381ff001);
+        String report = startupReport(main, rtld);
+        require(report.contains("CBZ X1 → 0x200000018 (tidak diambil)")
+                && report.contains("CBNZ W1 → 0x200000018 (diambil)")
+                && report.contains("STRB W1, [X0, #1] @0x200002201 = 0xa5 (.bss simulasi)")
+                && report.contains("STURB W1, [X8, #-1] @0x200002207 = 0xa5 (.bss simulasi)")
+                && report.contains("LDR X2, [X0, #0x0] @0x200002200 = 0xa50000000000a500")
+                && report.contains("@0x2000021ff — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Compare branches, signed store offset, little-endian overlay, and the lower BSS boundary");
+
+        rtld.putInt(0x124, 0x91008008).putInt(0x128, 0x39000101);
+        require(startupReport(main, rtld).contains("@0x200002220 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "The byte at the exclusive BSS end is not writable");
+    }
+
+    private static void testStartupWordStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x528014a1)
+                .putInt(0x114, 0x4b0003e8).putInt(0x118, 0x12001c29).putInt(0x11c, 0x3200c3ea)
+                .putInt(0x120, 0x1b0a7d29).putInt(0x124, 0xb9000409).putInt(0x128, 0xb8000009)
+                .putInt(0x12c, 0xf9400002).putInt(0x130, 0x927ef44a).putInt(0x134, 0xb801e009);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB W8, WZR, W0 = 0xffffde00")
+                && report.contains("AND W9, W1, #0xff = 0xa5")
+                && report.contains("ORR W10, WZR, #0x1010101 = 0x1010101")
+                && report.contains("MUL W9, W9, W10 = 0xa5a5a5a5")
+                && report.contains("STR W9, [X0, #4] @0x200002204 = 0xa5a5a5a5 (.bss simulasi)")
+                && report.contains("STUR W9, [X0, #0] @0x200002200 = 0xa5a5a5a5 (.bss simulasi)")
+                && report.contains("LDR X2, [X0, #0x0] @0x200002200 = 0xa5a5a5a5a5a5a5a5")
+                && report.contains("AND X10, X2, #0xfffffffffffffffc = 0xa5a5a5a5a5a5a5a4")
+                && report.contains("@0x20000221e — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Word arithmetic, replicated and rotated masks, readback, and a store crossing the BSS end");
+
+        rtld.putInt(0x134, 0xb8001009);
+        require(startupReport(main, rtld).contains("@0x200002201 — jejak berhenti, alamat simpan tidak sejajar."),
+                "The startup probe stops at an unaligned word store");
+        rtld.putInt(0x11c, 0x3240c3ea);
+        require(startupReport(main, rtld).contains("ORR — jejak berhenti, encoding mask tidak valid."),
+                "A 32-bit logical immediate cannot set N");
+        rtld.putInt(0x11c, 0x3200c3ff);
+        require(startupReport(main, rtld).contains("ORR — jejak berhenti, SP belum dapat dimodelkan."),
+                "A logical immediate with Rd 31 writes SP rather than the zero register");
+    }
+
+    private static void testStartupPairStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x91001008)
+                .putInt(0x114, 0x528014a1).putInt(0x118, 0x52824682)
+                .putInt(0x11c, 0x293f8901).putInt(0x120, 0xf9400003).putInt(0x124, 0x29038801);
+        String report = startupReport(main, rtld);
+        require(report.contains("STP W1, W2, [X8, #-4] @0x200002200 = 0xa5, 0x1234 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x0] @0x200002200 = 0x1234000000a5")
+                && report.contains("STP W1, W2, [X0, #28] @0x20000221c — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Signed pair offset, little-endian word order, and range check of both words");
+
+        rtld.putInt(0x11c, 0x293f9501);
+        require(startupReport(main, rtld).contains("STP W1, W5, [X8, #-4] — jejak berhenti, nilai atau alamat simpan belum diketahui."),
+                "The second source register must be known");
+        rtld.putInt(0x11c, 0x29808901);
+        require(startupReport(main, rtld).contains("kata 0x29808901 — jejak berhenti, instruksi di luar cakupan."),
+                "Pair stores with writeback remain unsupported");
+    }
+
+    private static void testStartupDoublewordPairStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000)
+                .putInt(0x110, 0x528014a1).putInt(0x114, 0x52824682).putInt(0x118, 0xb3607c41)
+                .putInt(0x11c, 0x91008008).putInt(0x120, 0xd1002108).putInt(0x124, 0xa93f8901)
+                .putInt(0x128, 0xf9400803).putInt(0x12c, 0xf9400c04).putInt(0x130, 0xa9000901);
+        String report = startupReport(main, rtld);
+        require(report.contains("BFI X1, X2, #32, #32 = 0x1234000000a5")
+                && report.contains("SUB X8, X8 = 0x200002218")
+                && report.contains("STP X1, X2, [X8, #-8] @0x200002210 = 0x1234000000a5, 0x1234 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x10] @0x200002210 = 0x1234000000a5")
+                && report.contains("LDR X4, [X0, #0x18] @0x200002218 = 0x1234")
+                && report.contains("STP X1, X2, [X8, #0] @0x200002218 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "BFI preserves low bits, pair stores retain high bits, and the full 16-byte range is checked");
+    }
+
+    private static void testStartupUnscaledLoadCompare() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2c0002d).putInt(0x10c, 0x728acf0d).putInt(0x110, 0x72a2468d)
+                .putInt(0x114, 0xd0000008).putInt(0x118, 0x9107e108).putInt(0x11c, 0xf85f8110)
+                .putInt(0x120, 0xeb0d021f).putInt(0x124, 0x5400004d);
+        rtld.putLong(0x3f0, 0x12345678L);
+        String report = startupReport(main, rtld);
+        require(report.contains("MOVK W13 = 0x12345678")
+                && report.contains("LDUR X16, [X8, #-8] @0x2000021f0 = 0x12345678")
+                && report.contains("CMP X16, X13 (NZCV = 0x6)")
+                && report.contains("B.LE → 0x20000002c (diambil)"),
+                "MOVK keeps low bits while a W write clears high bits, and a signed load can set branch flags");
+
+        rtld.putLong(0x3f0, 0x12345679L);
+        require(startupReport(main, rtld).contains("B.LE → 0x20000002c (tidak diambil)"),
+                "Signed branch does not take the less-or-equal path for a greater value");
+        rtld.putLong(0x3f0, Long.MIN_VALUE);
+        report = startupReport(main, rtld);
+        require(report.contains("CMP X16, X13 (NZCV = 0x3)")
+                && report.contains("B.LE → 0x20000002c (diambil)"), "Signed compare branch accounts for overflow");
+
+        rtld.putInt(0x118, 0x9103e108).putInt(0x11c, 0xf8500110);
+        require(startupReport(main, rtld).contains("LDUR X16, [X8, #-256] @0x200001ff8 — jejak berhenti"),
+                "An unscaled load in the gap before .data is rejected");
+        assertStartupStop(main, rtld, 0x72c0000d, "encoding MOVK W tidak valid");
+        assertStartupStop(main, rtld, 0xeb0103ff, "CMP XZR, X1 — jejak berhenti, nilai register belum diketahui");
+        require(startupReport(main, rtld.putInt(0x108, 0x72800001)).contains("MOVK W1 = belum diketahui"),
+                "MOVK cannot infer the bits it preserves from an unknown register");
+    }
+
+    private static void testStartupPostIndexedLoad() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91078108).putInt(0x110, 0xf8410501)
+                .putInt(0x114, 0xf85f0502).putInt(0x118, 0xf9400103).putInt(0x11c, 0xb8404504)
+                .putInt(0x120, 0xf8410508);
+        rtld.putLong(0x3e0, 0x11223344f5667788L).putLong(0x3f0, 0x99aabbccddeeff00L);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDR X1, [X8], #16 @0x2000021e0 = 0x11223344f5667788 (X8 = 0x2000021f0)")
+                && report.contains("LDR X2, [X8], #-16 @0x2000021f0 = 0x99aabbccddeeff00 (X8 = 0x2000021e0)")
+                && report.contains("LDR X3, [X8, #0x0] @0x2000021e0 = 0x11223344f5667788")
+                && report.contains("LDR W4, [X8], #4 @0x2000021e0 = 0xf5667788 (X8 = 0x2000021e4)")
+                && report.contains("LDR X8, [X8], #16 — jejak berhenti, register alamat dan tujuan post-index sama."),
+                "Post-index loads read before writeback, apply signed offsets, and stop on register overlap");
+
+        rtld.putInt(0x110, 0xf8410d01);
+        require(startupReport(main, rtld).contains("kata 0xf8410d01 — jejak berhenti, instruksi di luar cakupan."),
+                "Pre-index loads remain unsupported");
+        rtld.putInt(0x10c, 0xd1002108).putInt(0x110, 0xf8410501);
+        report = startupReport(main, rtld);
+        require(report.contains("LDR X1, [X8], #16 @0x200001ff8 — jejak berhenti")
+                && !report.contains("0x200000014 LDR"), "A load in a segment gap stops before writeback");
+    }
+
+    private static void testStartupInstructionBudget() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0x52802581).putInt(0x10c, 0xd1000421).putInt(0x110, 0xb5ffffe1);
+        String report = startupReport(main, rtld);
+        require(report.lines().filter(line -> line.contains("0x200000010 CBNZ X1")).count() == 300
+                && report.contains("0x200000010 CBNZ X1 → 0x20000000c (tidak diambil)")
+                && report.contains("0x200000014 kata 0x0"), "A finite loop can finish after more than 256 steps");
+
+        rtld.putInt(0x108, 0x14000000);
+        report = startupReport(main, rtld);
+        require(report.lines().filter(line -> line.contains("0x200000008 B → 0x200000008")).count() == 1023
+                && report.contains("Jejak berhenti setelah 1024 instruksi.")
+                && report.contains("Kata .text mulai 0x200000008"), "The probe still limits an infinite loop");
+    }
+
+    private static void testStartupWordImmediateCompare() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2c0002d).putInt(0x10c, 0x710001bf).putInt(0x110, 0x54000040)
+                .putInt(0x118, 0x52b0000d).putInt(0x11c, 0x710005bf)
+                .putInt(0x120, 0x5280000d).putInt(0x124, 0x710005bf);
+        String report = startupReport(main, rtld);
+        require(report.contains("CMP W13, #0x0 (NZCV = 0x6)")
+                && report.contains("B.EQ → 0x200000018 (diambil)")
+                && report.contains("0x20000001c CMP W13, #0x1 (NZCV = 0x3)")
+                && report.contains("0x200000024 CMP W13, #0x1 (NZCV = 0x8)"),
+                "Word comparison ignores the high half and computes 32-bit overflow and borrow");
+    }
+
+    private static void testStartupRegisterOffsetStore() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91078108).putInt(0x110, 0xd2800109)
+                .putInt(0x114, 0xd2c0002a).putInt(0x118, 0xf829690a)
+                .putInt(0x11c, 0xf9400504).putInt(0x120, 0xb9400d05);
+        rtld.putLong(0x3e8, 0xdeadbeef01234567L);
+        String report = startupReport(main, rtld);
+        require(report.contains("STR X10, [X8, X9] @0x2000021e8 = 0x100000000 (.data simulasi)")
+                && report.contains("LDR X4, [X8, #0x8] @0x2000021e8 = 0x100000000")
+                && report.contains("LDR W5, [X8, #0xc] @0x2000021ec = 0x1"),
+                "Register-offset writes affect both word and doubleword reads from the data overlay");
+        rtld.putInt(0x10c, 0x91080108);
+        require(startupReport(main, rtld).contains("STR X10, [X8, X9] @0x200002208 = 0x100000000 (.bss simulasi)"),
+                "Register-offset stores can also target BSS");
+        rtld.putInt(0x108, 0xb0000008).putInt(0x10c, 0x91000108);
+        require(startupReport(main, rtld).contains("STR X10, [X8, X9] @0x200001008 — jejak berhenti, alamat simpan di luar .data atau .bss rtld."),
+                "Register-offset stores reject read-only segments");
+        rtld.putInt(0x118, 0xf829790a);
+        require(startupReport(main, rtld).contains("kata 0xf829790a — jejak berhenti, instruksi di luar cakupan."),
+                "Scaled register-offset stores remain unsupported");
+    }
+
+    private static void testStartupStackFrame() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd10083ff).putInt(0x10c, 0xd2868ac2)
+                .putInt(0x110, 0xa9010be2).putInt(0x114, 0xa90107e2)
+                .putInt(0x118, 0x910043fd).putInt(0x11c, 0xf94003a3).putInt(0x120, 0xf9400fe4)
+                .putInt(0x124, 0xf84207e5).putInt(0x128, 0xf94003a6);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB SP, SP = 0x7ffeffffffe0")
+                && report.contains("STP X2, X2, [SP, #16] @0x7ffefffffff0 = 0x3456, 0x3456 (stack simulasi)")
+                && report.contains("STP X2, X1, [SP, #16] @0x7ffefffffff0 = 0x3456, belum diketahui (stack simulasi)")
+                && report.contains("ADD X29, SP = 0x7ffefffffff0")
+                && report.contains("LDR X3, [X29, #0x0] @0x7ffefffffff0 = 0x3456")
+                && report.contains("LDR X4, [SP, #0x18] @0x7ffefffffff8 = belum diketahui")
+                && report.contains("LDR X5, [SP], #32 @0x7ffeffffffe0 = belum diketahui (SP = 0x7fff00000000)")
+                && report.contains("LDR X6, [X29, #0x0] @0x7ffefffffff0 — jejak berhenti"),
+                "Stack frames preserve unknown saves, support frame-pointer reads, and reject inactive addresses");
+        rtld.putInt(0x124, 0xf84207ff);
+        require(startupReport(main, rtld).contains("LDR XZR, [SP], #32 @0x7ffeffffffe0 (hasil dibuang) (SP = 0x7fff00000000)"),
+                "SP and XZR are distinct during writeback");
+        rtld.putInt(0x114, 0xa90187e2);
+        require(startupReport(main, rtld).contains("alamat simpan di luar stack simulasi aktif."),
+                "A pair store must fit entirely inside the active stack");
+        assertStartupStop(main, rtld, 0xd10023ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
+        assertStartupStop(main, rtld, 0xd14047ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
+    }
+
+    private static void testStartupUnalignedBssSlots() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91081000)
+                .putInt(0x110, 0xd2977541).putInt(0x114, 0xd2866442)
+                .putInt(0x118, 0xa9000801).putInt(0x11c, 0xf9400003).putInt(0x120, 0xf9400404)
+                .putInt(0x124, 0x91001005).putInt(0x128, 0xf94000a6);
+        String report = startupReport(main, rtld);
+        require(report.contains("STP X1, X2, [X0, #0] @0x200002204 = 0xbbaa, 0x3322 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x0] @0x200002204 = 0xbbaa")
+                && report.contains("LDR X4, [X0, #0x8] @0x20000220c = 0x3322")
+                && report.contains("LDR X6, [X5, #0x0] @0x200002208 = 0x332200000000"),
+                "Unaligned pair slots preserve both elements and little-endian readback across the boundary");
+        rtld.putInt(0x10c, 0x91085000);
+        require(startupReport(main, rtld).contains("STP X1, X2, [X0, #0] @0x200002214 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "An unaligned pair store needs its full 16-byte range");
+        rtld.putInt(0x10c, 0x91087000).putInt(0x118, 0xf9400003);
+        require(startupReport(main, rtld).contains("LDR X3, [X0, #0x0] @0x20000221c — jejak berhenti"),
+                "An unaligned doubleword load cannot cross the end of BSS");
+    }
+
+    private static void testStartupDoublewordImmediateStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2868ac2).putInt(0x10c, 0xf81e0fe2).putInt(0x110, 0xf94003e3)
+                .putInt(0x114, 0xd0000008).putInt(0x118, 0x91081108)
+                .putInt(0x11c, 0xf9000502).putInt(0x120, 0xf9400504).putInt(0x124, 0xf8008d08);
+        String report = startupReport(main, rtld);
+        require(report.contains("STR X2, [SP, #-32]! @0x7ffeffffffe0 = 0x3456 (stack simulasi) (SP = 0x7ffeffffffe0)")
+                && report.contains("LDR X3, [SP, #0x0] @0x7ffeffffffe0 = 0x3456")
+                && report.contains("STR X2, [X8, #8] @0x20000220c = 0x3456 (.bss simulasi)")
+                && report.contains("LDR X4, [X8, #0x8] @0x20000220c = 0x3456")
+                && report.contains("STR X8, [X8, #8]! — jejak berhenti, register alamat dan nilai pre-index sama."),
+                "Pre-index stack allocation, unsigned unaligned BSS write, and overlapping writeback rejection");
+        rtld.putInt(0x118, 0x91080108).putInt(0x11c, 0xf8008d02).putInt(0x120, 0xf9400104);
+        report = startupReport(main, rtld);
+        require(report.contains("STR X2, [X8, #8]! @0x200002208 = 0x3456 (.bss simulasi) (X8 = 0x200002208)")
+                && report.contains("LDR X4, [X8, #0x0] @0x200002208 = 0x3456"),
+                "Pre-index writeback also updates an ordinary base register during a valid store");
+        rtld.putInt(0x118, 0x91085108).putInt(0x11c, 0xf9000502);
+        require(startupReport(main, rtld).contains("STR X2, [X8, #8] @0x20000221c — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "An unsigned unaligned store must fit entirely within BSS");
+        rtld.putInt(0x10c, 0xf81f8fe2);
+        require(startupReport(main, rtld).contains("STR X2, [SP, #-8]! — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte."),
+                "A pre-index store cannot move SP to an unaligned address");
+    }
+
+    private static void testStartupRegisterBranchTable() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xb0000018).putInt(0x10c, 0x91028718).putInt(0x110, 0xd28000e7)
+                .putInt(0x114, 0x10000009).putInt(0x118, 0x38676b0b)
+                .putInt(0x11c, 0x8b0b0929).putInt(0x120, 0xd61f0120)
+                .putInt(0x12c, 0xd2800844).put(0x1e8, (byte) 6);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDRB W11, [X24, X7] @0x2000010a8 = 0x6")
+                && report.contains("ADD X9, X9, X11, LSL #2 = 0x20000002c")
+                && report.contains("BR X9 → 0x20000002c")
+                && report.contains("0x20000002c MOVZ X4 = 0x42"),
+                "A byte table entry selects an aligned instruction inside rtld");
+
+        rtld.put(0x1e8, (byte) 0xff);
+        report = startupReport(main, rtld);
+        require(report.contains("LDRB W11, [X24, X7] @0x2000010a8 = 0xff")
+                && report.contains("BR X9 → 0x200000410\nJejak berhenti. Target di luar .text rtld."),
+                "Byte loads zero-extend, and BR cannot jump outside its code segment");
+        rtld.put(0x1e8, (byte) 6).putInt(0x114, 0x30000009);
+        require(startupReport(main, rtld).contains("BR X9 → 0x20000002d\nJejak berhenti. Target tidak sejajar 4 byte."),
+                "An unaligned register branch cannot fetch instructions");
+        rtld.putInt(0x114, 0x10000009).putInt(0x120, 0xd61f00a0);
+        require(startupReport(main, rtld).contains("BR X5 — jejak berhenti, alamat cabang belum diketahui."),
+                "BR requires a known target register");
+        rtld.putInt(0x118, 0x38656b0b);
+        require(startupReport(main, rtld).contains("LDRB W11, [X24, X5] — jejak berhenti, register alamat belum diketahui."),
+                "A register-offset load requires a known index");
+        rtld.putInt(0x118, 0x38676b0b).putInt(0x10c, 0x9102e718);
+        require(startupReport(main, rtld).contains("LDRB W11, [X24, X7] @0x2000010c0 — jejak berhenti"),
+                "A register-offset byte load cannot read the gap past .rodata");
+    }
+
+    private static void testStartupConditionalSet() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xf100001f).putInt(0x10c, 0x1a9f17e4).putInt(0x110, 0x9a9f07e5)
+                .putInt(0x114, 0x54000040).putInt(0x11c, 0xf100041f)
+                .putInt(0x120, 0x9a9f27e6).putInt(0x124, 0x1a9f37e7);
+        String report = startupReport(main, rtld);
+        require(report.contains("CSET W4, EQ = 0x1")
+                && report.contains("CSET X5, NE = 0x0")
+                && report.contains("B.EQ → 0x20000001c (diambil)")
+                && report.contains("CSET X6, CC = 0x1")
+                && report.contains("CSET W7, CS = 0x0"),
+                "Conditional set decodes the inverted condition and preserves NZCV for the next branch");
+
+        rtld.putInt(0x108, 0x1a9f17e4);
+        report = startupReport(main, rtld);
+        require(report.contains("CSET W4, EQ = belum diketahui")
+                && report.contains("B.EQ → 0x20000001c — jejak berhenti, NZCV belum diketahui."),
+                "Conditional set propagates unknown flags without choosing a result");
+        rtld.putInt(0x108, 0x1a9fe7e4);
+        require(startupReport(main, rtld).contains("kata 0x1a9fe7e4 — jejak berhenti, instruksi di luar cakupan."),
+                "An unconditional CSINC encoding is not decoded as CSET");
+    }
+
+    private static void testStartupStackReturn() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91080108).putInt(0x110, 0x94000003)
+                .putInt(0x114, 0xd2800849).putInt(0x118, 0x1400000a).putInt(0x11c, 0xd10083ff)
+                .putInt(0x120, 0xd2801fe2).putInt(0x124, 0xa90107fe).putInt(0x128, 0x39000d02)
+                .putInt(0x12c, 0x39400d03).putInt(0x130, 0xd280001e).putInt(0x134, 0xa94113fe)
+                .putInt(0x138, 0xf84207e5).putInt(0x13c, 0xd65f03c0);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDRB W3, [X8, #0x3] @0x200002203 = 0xff")
+                && report.contains("0x200000030 MOVZ X30 = 0x0")
+                && report.contains("LDP X30, X4, [SP, #16] @0x7ffefffffff0 = 0x200000014, X4 = belum diketahui")
+                && report.contains("LDR X5, [SP], #32 @0x7ffeffffffe0 = belum diketahui (SP = 0x7fff00000000)")
+                && report.contains("RET X30 → 0x200000014")
+                && report.contains("0x200000014 MOVZ X9 = 0x42"),
+                "A byte read sees the store, and the epilogue restores the saved return address and SP");
+        rtld.putInt(0x134, 0xa9417bfe);
+        report = startupReport(main, rtld);
+        require(report.contains("LDP X30, X30, [SP, #16] — jejak berhenti, kedua register tujuan LDP sama.")
+                && !report.contains("0x200000038 LDR"), "Duplicate LDP destinations stop before register updates");
+        rtld.putInt(0x134, 0xa94193fe);
+        report = startupReport(main, rtld);
+        require(report.contains("LDP X30, X4, [SP, #24] @0x7ffefffffff8 — jejak berhenti")
+                && !report.contains("0x200000038 LDR"), "Both elements must fit in the active stack");
+
+        rtld.putInt(0x10c, 0x91082108).putInt(0x110, 0x297f9504).putInt(0x114, 0);
+        require(startupReport(main, rtld).contains("LDP W4, W5, [X8, #-4] @0x200002204 = 0x0, W5 = 0x0"),
+                "A word pair uses a signed offset scaled by four");
+    }
+
+    private static void testStartupInstructionWindow() {
+        ByteBuffer image = ByteBuffer.allocate(0x100).asReadOnlyBuffer();
+        NsoHeader.Segment[] segments = {
+                new NsoHeader.Segment(".text", 0, 0, 0, 0x100, false, null),
+                new NsoHeader.Segment(".rodata", 0, 0, 0x100, 0, false, null),
+                new NsoHeader.Segment(".data", 0, 0, 0x100, 0, false, null)
+        };
+        StringBuilder report = new StringBuilder();
+        NsoStartupProbe.append(report, image, segments, 0x2_0000_0000L, 0x100, 0x100);
+        require(report.toString().endsWith("    " + " 0x0".repeat(32) + "\n"),
+                "A stopped trace exports a bounded 32-word window");
+        segments[0] = new NsoHeader.Segment(".text", 0, 0, 0, 12, false, null);
+        report.setLength(0);
+        NsoStartupProbe.append(report, image, segments, 0x2_0000_0000L, 0x100, 0x100);
+        require(report.toString().endsWith("    " + " 0x0".repeat(3) + "\n"),
+                "The diagnostic window ends at the last complete text instruction");
+    }
+
+    private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld, audit, "rtld");
+        return audit.report();
     }
 
     private static void testWeakGotSimulation() throws IOException {

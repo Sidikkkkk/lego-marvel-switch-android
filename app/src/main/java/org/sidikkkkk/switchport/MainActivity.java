@@ -8,14 +8,18 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.provider.DocumentsContract.Document;
+import android.webkit.MimeTypeMap;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -25,8 +29,14 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int OPEN_MAIN = 1;
     private static final int OPEN_EXEFS = 2;
+    private static final int SAVE_LOG = 3;
+    private static final int MAX_SAVED_REPORT_CHARS = 65536;
+    private static final String STATE_REPORT = "report";
     private final ExecutorService inspector = Executors.newSingleThreadExecutor();
     private TextView status;
+    private Button saveLog;
+    private String latestReport;
+    private int inspectionId;
 
     private record ModuleFile(String name, Uri uri) {}
 
@@ -58,9 +68,16 @@ public final class MainActivity extends Activity {
         });
         content.addView(chooseFolder);
 
+        saveLog = new Button(this);
+        saveLog.setText("Simpan log");
+        saveLog.setOnClickListener(view -> chooseLogLocation());
+        content.addView(saveLog);
+
         status = new TextView(this);
         status.setTextIsSelectable(true);
-        status.setText("Pemeriksaan file game Switch. Eksekusi game belum tersedia.");
+        latestReport = savedInstanceState == null ? null : savedInstanceState.getString(STATE_REPORT);
+        saveLog.setEnabled(latestReport != null);
+        status.setText(latestReport == null ? "Pemeriksaan file game Switch. Eksekusi game belum tersedia." : latestReport);
         content.addView(status);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
@@ -70,12 +87,21 @@ public final class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent result) {
         super.onActivityResult(requestCode, resultCode, result);
-        if ((requestCode != OPEN_MAIN && requestCode != OPEN_EXEFS) || resultCode != RESULT_OK || result == null
-                || result.getData() == null) {
+        if (resultCode != RESULT_OK || result == null || result.getData() == null) {
             return;
         }
         Uri uri = result.getData();
+        if (requestCode == SAVE_LOG) {
+            saveReport(uri);
+            return;
+        }
+        if (requestCode != OPEN_MAIN && requestCode != OPEN_EXEFS) {
+            return;
+        }
         boolean folder = requestCode == OPEN_EXEFS;
+        int currentInspection = ++inspectionId;
+        latestReport = null;
+        saveLog.setEnabled(false);
         status.setText(folder ? "Sedang memeriksa modul ExeFS…" : "Sedang memeriksa segmen NSO0…");
         inspector.execute(() -> {
             String report;
@@ -86,11 +112,55 @@ public final class MainActivity extends Activity {
             }
             String completedReport = report;
             runOnUiThread(() -> {
-                if (!isDestroyed()) {
-                    status.setText(completedReport);
+                if (!isDestroyed() && currentInspection == inspectionId) {
+                    latestReport = completedReport;
+                    status.setText(latestReport);
+                    saveLog.setEnabled(true);
                 }
             });
         });
+    }
+
+    private void chooseLogLocation() {
+        Intent picker = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        String mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension("log");
+        picker.setType(mime == null ? "application/octet-stream" : mime);
+        picker.putExtra(Intent.EXTRA_TITLE, "switch-port.log");
+        startActivityForResult(picker, SAVE_LOG);
+    }
+
+    private void saveReport(Uri uri) {
+        String report = latestReport;
+        if (report == null) {
+            Toast.makeText(this, "Jalankan pemeriksaan lagi untuk menyimpan log.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        inspector.execute(() -> {
+            String message = "Log tersimpan.";
+            try (OutputStream stream = getContentResolver().openOutputStream(uri, "wt")) {
+                if (stream == null) {
+                    throw new IOException("File tujuan tidak bisa dibuka.");
+                }
+                stream.write(report.getBytes(StandardCharsets.UTF_8));
+            } catch (IOException | SecurityException | IllegalArgumentException error) {
+                message = "Log gagal disimpan. " + errorMessage(error);
+            }
+            String completedMessage = message;
+            runOnUiThread(() -> {
+                if (!isDestroyed()) {
+                    Toast.makeText(this, completedMessage, Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        if (latestReport != null && latestReport.length() <= MAX_SAVED_REPORT_CHARS) {
+            state.putString(STATE_REPORT, latestReport);
+        }
     }
 
     @Override

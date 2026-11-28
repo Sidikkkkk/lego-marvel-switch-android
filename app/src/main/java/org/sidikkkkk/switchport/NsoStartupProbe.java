@@ -79,7 +79,9 @@ final class NsoStartupProbe {
             boolean unscaledLoad = (instruction & 0xbfe0_0c00) == 0xb840_0000;
             boolean postIndexedLoad = (instruction & 0xbfe0_0c00) == 0xb840_0400;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
+            boolean unsignedDoublewordStore = (instruction & 0xffc0_0000) == 0xf900_0000;
             boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
+            boolean preIndexedStore = (instruction & 0xffe0_0c00) == 0xf800_0c00;
             boolean pairStore = (instruction & 0x7fc0_0000) == 0x2900_0000;
             boolean registerOffsetStore = (instruction & 0xffe0_fc00) == 0xf820_6800;
             long address = base + pc;
@@ -264,7 +266,8 @@ final class NsoStartupProbe {
                     report.append(" (").append(reg(source)).append(" = 0x")
                             .append(Long.toHexString(writeback)).append(')');
                 }
-            } else if (unsignedStore || unscaledStore || pairStore || registerOffsetStore) {
+            } else if (unsignedStore || unsignedDoublewordStore || unscaledStore
+                    || preIndexedStore || pairStore || registerOffsetStore) {
                 int source = instruction & 31;
                 int secondSource = (instruction >>> 10) & 31;
                 int addressRegister = (instruction >>> 5) & 31;
@@ -282,6 +285,10 @@ final class NsoStartupProbe {
                     size = Long.BYTES;
                     byteOffset = registers[offsetRegister];
                     report.append("STR ").append(zeroReg(source, true));
+                } else if (unsignedDoublewordStore || preIndexedStore) {
+                    size = Long.BYTES;
+                    byteOffset = preIndexedStore ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                    report.append("STR ").append(zeroReg(source, true));
                 } else {
                     size = instruction < 0 ? Integer.BYTES : 1;
                     int encodedOffset = (instruction >>> 12) & 0x1ff;
@@ -296,10 +303,24 @@ final class NsoStartupProbe {
                     report.append('#').append(byteOffset);
                 }
                 report.append(']');
+                if (preIndexedStore) {
+                    report.append('!');
+                    if (addressRegister != 31 && addressRegister == source) {
+                        report.append(" — jejak berhenti, register alamat dan nilai pre-index sama.\n");
+                        appendWords(report, data, pc, lastInstruction, base);
+                        return;
+                    }
+                }
                 long addressRegisterValue = addressRegister == 31 ? stackPointer : registers[addressRegister];
                 long storeAddress = addressRegisterValue + byteOffset;
+                boolean updatesStackPointer = preIndexedStore && addressRegister == 31;
+                if (updatesStackPointer && !validStackPointer(storeAddress)) {
+                    report.append(" — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
                 int totalSize = pairStore ? 2 * size : size;
-                boolean inStack = inActiveStack(storeAddress, totalSize, stackPointer);
+                boolean inStack = inActiveStack(storeAddress, totalSize, updatesStackPointer ? storeAddress : stackPointer);
                 boolean valuesKnown = known[source] && (!pairStore || known[secondSource]);
                 if ((addressRegister != 31 && !known[addressRegister])
                         || (registerOffsetStore && !known[offsetRegister])
@@ -320,7 +341,8 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                if ((storeAddress & (size - 1)) != 0 && !(pairStore && inBss)) {
+                boolean allowUnaligned = inBss && (pairStore || unsignedDoublewordStore);
+                if ((storeAddress & (size - 1)) != 0 && !allowUnaligned) {
                     report.append(" — jejak berhenti, alamat simpan tidak sejajar.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
@@ -333,6 +355,15 @@ final class NsoStartupProbe {
                             known[secondSource]);
                 }
                 report.append(inStack ? " (stack simulasi)" : inData ? " (.data simulasi)" : " (.bss simulasi)");
+                if (preIndexedStore) {
+                    if (updatesStackPointer) {
+                        stackPointer = storeAddress;
+                    } else {
+                        registers[addressRegister] = storeAddress;
+                    }
+                    report.append(" (").append(reg(addressRegister)).append(" = 0x")
+                            .append(Long.toHexString(storeAddress)).append(')');
+                }
             } else if ((instruction & 0xffc0_0000) == 0xb340_0000) {
                 int immr = (instruction >>> 16) & 63;
                 int imms = (instruction >>> 10) & 63;

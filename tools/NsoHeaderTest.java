@@ -167,6 +167,7 @@ public final class NsoHeaderTest {
         testStartupRegisterOffsetStore();
         testStartupStackFrame();
         testStartupUnalignedBssSlots();
+        testStartupDoublewordImmediateStores();
         System.out.println("NSO checks passed.");
     }
 
@@ -575,6 +576,32 @@ public final class NsoHeaderTest {
         rtld.putInt(0x10c, 0x91087000).putInt(0x118, 0xf9400003);
         require(startupReport(main, rtld).contains("LDR X3, [X0, #0x0] @0x20000221c — jejak berhenti"),
                 "An unaligned doubleword load cannot cross the end of BSS");
+    }
+
+    private static void testStartupDoublewordImmediateStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd2868ac2).putInt(0x10c, 0xf81e0fe2).putInt(0x110, 0xf94003e3)
+                .putInt(0x114, 0xd0000008).putInt(0x118, 0x91081108)
+                .putInt(0x11c, 0xf9000502).putInt(0x120, 0xf9400504).putInt(0x124, 0xf8008d08);
+        String report = startupReport(main, rtld);
+        require(report.contains("STR X2, [SP, #-32]! @0x7ffeffffffe0 = 0x3456 (stack simulasi) (SP = 0x7ffeffffffe0)")
+                && report.contains("LDR X3, [SP, #0x0] @0x7ffeffffffe0 = 0x3456")
+                && report.contains("STR X2, [X8, #8] @0x20000220c = 0x3456 (.bss simulasi)")
+                && report.contains("LDR X4, [X8, #0x8] @0x20000220c = 0x3456")
+                && report.contains("STR X8, [X8, #8]! — jejak berhenti, register alamat dan nilai pre-index sama."),
+                "Pre-index stack allocation, unsigned unaligned BSS write, and overlapping writeback rejection");
+        rtld.putInt(0x118, 0x91080108).putInt(0x11c, 0xf8008d02).putInt(0x120, 0xf9400104);
+        report = startupReport(main, rtld);
+        require(report.contains("STR X2, [X8, #8]! @0x200002208 = 0x3456 (.bss simulasi) (X8 = 0x200002208)")
+                && report.contains("LDR X4, [X8, #0x0] @0x200002208 = 0x3456"),
+                "Pre-index writeback also updates an ordinary base register during a valid store");
+        rtld.putInt(0x118, 0x91085108).putInt(0x11c, 0xf9000502);
+        require(startupReport(main, rtld).contains("STR X2, [X8, #8] @0x20000221c — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "An unsigned unaligned store must fit entirely within BSS");
+        rtld.putInt(0x10c, 0xf81f8fe2);
+        require(startupReport(main, rtld).contains("STR X2, [SP, #-8]! — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte."),
+                "A pre-index store cannot move SP to an unaligned address");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

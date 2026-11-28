@@ -80,6 +80,12 @@ final class NsoDynamic {
                 relocations.appendReport(report);
                 if (audit != null && symbols != null) {
                     relocations.captureImports(audit);
+                    if (audit.hasBoundaryEvidence()) {
+                        // appendRelocations validated these byte ranges before collecting the evidence.
+                        audit.addTableRange("DT_REL", tags[DT_REL], tags[DT_RELSZ]);
+                        audit.addTableRange("DT_RELA", tags[DT_RELA], tags[DT_RELASZ]);
+                        audit.addTableRange("DT_JMPREL", tags[DT_JMPREL], tags[DT_PLTRELSZ]);
+                    }
                 }
                 if (!data.isReadOnly()) {
                     appendRelativeTest(report, data, segments, tags, bssStart, bssEnd);
@@ -275,7 +281,7 @@ final class NsoDynamic {
         if (size > 0) {
             requireRange(segments, address, size, name);
             if (relocations != null) {
-                relocations.scan(address, size, entrySize);
+                relocations.scan(address, size, entrySize, name);
             }
         }
         report.append("Relokasi ").append(name).append("  ").append(size / entrySize).append(" entri\n");

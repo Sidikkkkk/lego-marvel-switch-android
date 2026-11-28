@@ -30,4 +30,6 @@ The simulation supports modules with `.text` at offset zero. It verifies that ea
 
 The ExeFS report compares exact printable ASCII names up to 1,024 bytes and tracks up to 4,096 distinct referenced import indices. It counts global and weak definitions with default or protected visibility in readable sibling NSOs. These name matches do not establish a provider's module identity, search order, symbol version, or runtime address.
 
+For the four observed imports `__rel_dyn_start`, `__rel_dyn_end`, `__rel_plt_start`, and `__rel_plt_end`, the report also shows dynamic symbol attributes, the first reference, and validated relocation table spans. These observations leave their runtime values unresolved.
+
 Code is licensed under [MIT](LICENSE). Original game files remain on your device.

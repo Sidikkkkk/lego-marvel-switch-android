@@ -22,10 +22,10 @@ final class NsoRelocations {
     private static final int MAX_TYPE_ROWS = 24;
     private static final int MAX_IMPORT_SAMPLES = 16;
     private static final int MAX_TRACKED_IMPORT_INDICES = 4096;
-    private static final int MAX_CAPTURED_RELA_REFERENCES = 16384;
+    private static final int MAX_CAPTURED_IMPORT_REFERENCES = 16384;
 
     record SymbolTable(long address, long count, long strings, long stringSize) {}
-    private record ImportRela(long index, int entry) {}
+    private record ImportReference(long index, int entry, int entrySize) {}
 
     private static final class ImportUse {
         final int firstEntry;
@@ -43,7 +43,7 @@ final class NsoRelocations {
     private final ByteBuffer data;
     private final SymbolTable symbols;
     private final Map<Long, ImportUse> importUses;
-    private final List<ImportRela> importRela;
+    private final List<ImportReference> importReferencesToInspect;
     private final Map<Integer, Long> types = new LinkedHashMap<>();
     private final Set<Long> imports = new LinkedHashSet<>();
     private long otherTypes;
@@ -55,7 +55,7 @@ final class NsoRelocations {
         this.data = data;
         this.symbols = symbols;
         importUses = captureImports ? new LinkedHashMap<>() : null;
-        importRela = captureImports ? new ArrayList<>() : null;
+        importReferencesToInspect = captureImports ? new ArrayList<>() : null;
     }
 
     void scan(long address, long size, int entrySize, String table) throws InterruptedIOException {
@@ -106,8 +106,8 @@ final class NsoRelocations {
                 } else {
                     return;
                 }
-                if (entrySize == 3 * Long.BYTES && importRela.size() < MAX_CAPTURED_RELA_REFERENCES) {
-                    importRela.add(new ImportRela(index, relocationEntry));
+                if (importReferencesToInspect.size() < MAX_CAPTURED_IMPORT_REFERENCES) {
+                    importReferencesToInspect.add(new ImportReference(index, relocationEntry, entrySize));
                 }
             }
         }
@@ -128,7 +128,7 @@ final class NsoRelocations {
                 }
             }
         }
-        for (ImportRela reference : importRela) {
+        for (ImportReference reference : importReferencesToInspect) {
             String name = names.get(reference.index());
             if (name == null) {
                 continue;
@@ -136,16 +136,26 @@ final class NsoRelocations {
             int entry = reference.entry();
             int type = data.getInt(entry + Long.BYTES);
             long target = data.getLong(entry);
-            long addend = data.getLong(entry + 2 * Long.BYTES);
+            boolean rela = reference.entrySize() == 3 * Long.BYTES;
+            long addend = rela ? data.getLong(entry + 2 * Long.BYTES) : 0;
             int symbol = (int) (symbols.address + reference.index() * SYMBOL_ENTRY_SIZE);
             int attributes = data.get(symbol + 4) & 0xff;
             int binding = attributes >>> 4;
-            if ((binding == STB_GLOBAL || binding == STB_WEAK) && (attributes & 0xf) <= STT_FUNC
-                    && data.get(symbol + 5) == 0
-                    && (type == AARCH64_ABS64 || type == AARCH64_GLOB_DAT || (type == AARCH64_JUMP_SLOT && addend == 0))
-                    && alignedDataSlot(target, writableData)) {
-                audit.addBindingSlot(name, target, type, addend, data.getLong((int) target));
+            String reason = null;
+            if (!rela) {
+                reason = "format REL belum didukung";
+            } else if ((binding != STB_GLOBAL && binding != STB_WEAK) || (attributes & 0xf) > STT_FUNC
+                    || data.get(symbol + 5) != 0) {
+                reason = "atribut simbol impor di luar cakupan uji";
+            } else if (type != AARCH64_ABS64 && type != AARCH64_GLOB_DAT && type != AARCH64_JUMP_SLOT) {
+                reason = "jenis relokasi belum didukung";
+            } else if (type == AARCH64_JUMP_SLOT && addend != 0) {
+                reason = "addend JUMP_SLOT bukan nol (" + addend + ')';
+            } else if (!alignedDataSlot(target, writableData)) {
+                reason = "target di luar slot .data 64-bit yang sejajar";
             }
+            long original = reason == null ? data.getLong((int) target) : 0;
+            audit.addBindingSlot(new NsoImportAudit.BindingSlot(name, entry, target, type, addend, original, reason));
         }
         audit.finishImports(importReferences, invalidSymbolReferences);
     }
@@ -245,7 +255,7 @@ final class NsoRelocations {
         }
     }
 
-    private static String typeName(int type) {
+    static String typeName(int type) {
         return switch (type) {
             case 0 -> "R_AARCH64_NONE";
             case AARCH64_ABS64 -> "R_AARCH64_ABS64";

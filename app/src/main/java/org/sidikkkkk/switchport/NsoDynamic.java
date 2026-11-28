@@ -13,7 +13,7 @@ final class NsoDynamic {
     private static final int RELA_ENTRY_SIZE = 24;
     private static final int REL_ENTRY_SIZE = 16;
     private static final int RELR_ENTRY_SIZE = 8;
-    private static final long SIMULATED_BASE = 0x1_0000_0000L;
+    static final long SIMULATED_BASE = 0x1_0000_0000L;
     private static final int DT_NEEDED = 1;
     private static final int DT_PLTRELSZ = 2;
     private static final int DT_HASH = 4;

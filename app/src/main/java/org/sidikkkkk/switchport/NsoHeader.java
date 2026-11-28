@@ -168,6 +168,10 @@ final class NsoHeader {
         if (image != null) {
             ByteBuffer staged = ByteBuffer.wrap(image);
             memoryImage = staged.asReadOnlyBuffer();
+            if (audit != null) {
+                audit.addModuleLayout("main", NsoDynamic.SIMULATED_BASE, segments, memory.bssStart,
+                        memory.bssStart + memory.bssSize);
+            }
             report.append("\nMuat segmen ke buffer RAM berhasil (").append(image.length).append(" byte).\n");
             report.append('\n');
             try {

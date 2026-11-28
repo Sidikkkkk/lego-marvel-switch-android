@@ -30,7 +30,9 @@ The simulation supports modules with `.text` at offset zero. It verifies that ea
 
 The ExeFS report compares exact printable ASCII names up to 1,024 bytes and tracks up to 4,096 distinct referenced import indices. It counts global and weak definitions with default or protected visibility in readable sibling NSOs. These name matches do not establish a provider's module identity, search order, symbol version, or runtime address.
 
-The folder report also simulates `ABS64`, `GLOB_DAT`, and zero-addend `JUMP_SLOT` for a single eligible definition at a time. It assigns disjoint virtual bases to sibling modules and computes `S + A` in copies of aligned `.data` slots from `main`. It captures up to 16,384 RELA import references and reports how many references with a single candidate could be tested. No guest code is executed.
+The folder report also simulates `ABS64`, `GLOB_DAT`, and zero-addend `JUMP_SLOT` for a single eligible definition at a time. It assigns disjoint virtual bases to sibling modules and computes `S + A` in copies of aligned `.data` slots from `main`. It captures up to 16,384 import references and reports how many references with a single candidate could be tested, with examples explaining skipped entries.
+
+The startup report shows the simulated module segment ranges and follows up to eight direct AArch64 branches (`B` and `BL`) from the start of `rtld`'s `.text`. It stops before other instructions or out-of-segment targets. This trace is read-only. No guest code is executed.
 
 For the four observed imports `__rel_dyn_start`, `__rel_dyn_end`, `__rel_plt_start`, and `__rel_plt_end`, the report shows dynamic symbol attributes, the first reference, and validated relocation table spans. It can simulate a zero ELF value on copies of aligned 64-bit `.data` slots when the only missing definitions are weak references of this observed form and the scanned sibling symbol tables are readable. This does not establish the Horizon loader's runtime values.
 

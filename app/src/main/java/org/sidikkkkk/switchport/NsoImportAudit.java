@@ -27,10 +27,11 @@ final class NsoImportAudit {
     private static final int MAX_MISSING_NAMES = 20;
     private static final int MAX_AMBIGUOUS_NAMES = 10;
     private static final int MAX_BINDING_SAMPLES = 4;
+    private static final int MAX_SKIPPED_SAMPLES = 6;
 
     private record WeakSlot(long offset, long original) {}
-    private record BindingSlot(String name, long offset, int type, long addend, long original) {}
-    private record Export(String module, long address, int type) {}
+    record BindingSlot(String name, int entry, long offset, int type, long addend, long original, String reason) {}
+    private record Export(String module, long address, int type, long value) {}
 
     private final Map<String, WeakSlot> weakSlots = new LinkedHashMap<>();
     private final List<BindingSlot> bindingSlots = new ArrayList<>();
@@ -41,6 +42,8 @@ final class NsoImportAudit {
     private final Map<String, List<Export>> candidates = new LinkedHashMap<>();
     private final StringBuilder boundaryEvidence = new StringBuilder();
     private final StringBuilder tableRanges = new StringBuilder();
+    private final StringBuilder moduleRanges = new StringBuilder();
+    private final StringBuilder startupTrace = new StringBuilder();
     private long references = -1;
     private long invalidReferences;
 
@@ -65,8 +68,25 @@ final class NsoImportAudit {
         weakSlots.put(name, new WeakSlot(offset, original));
     }
 
-    void addBindingSlot(String name, long offset, int type, long addend, long original) {
-        bindingSlots.add(new BindingSlot(name, offset, type, addend, original));
+    void addBindingSlot(BindingSlot slot) {
+        bindingSlots.add(slot);
+    }
+
+    void addModuleLayout(String name, long base, NsoHeader.Segment[] segments, long bssStart, long bssEnd) {
+        moduleRanges.append("  ").append(name).append(" basis 0x").append(Long.toHexString(base)).append('\n');
+        for (NsoHeader.Segment segment : segments) {
+            if (segment.unpackedSize() > 0) {
+                appendRange(segment.name(), base + segment.memoryOffset(), base + segment.memoryEnd());
+            }
+        }
+        if (bssEnd > bssStart) {
+            appendRange(".bss", base + bssStart, base + bssEnd);
+        }
+    }
+
+    private void appendRange(String name, long start, long end) {
+        moduleRanges.append("    ").append(name).append(" [0x").append(Long.toHexString(start))
+                .append(", 0x").append(Long.toHexString(end)).append(")\n");
     }
 
     void noteExportScanFailure() {
@@ -118,13 +138,17 @@ final class NsoImportAudit {
                 }
                 boolean supported = mapped && segments[0].memoryOffset() == 0 && type <= STT_FUNC
                         && section < SHN_LORESERVE && (data.get(entry + 5) & 0xfc) == 0;
-                Export definition = new Export(module, supported ? base + value : -1, type);
+                Export definition = new Export(module, supported ? base + value : -1, type, value);
                 matches.merge(name, definition, (first, second) -> first.equals(second)
-                        ? first : new Export(module, -1, -1));
+                        ? first : new Export(module, -1, -1, 0));
             }
         }
         for (var entry : matches.entrySet()) {
             candidates.computeIfAbsent(entry.getKey(), key -> new ArrayList<>()).add(entry.getValue());
+        }
+        addModuleLayout(module, base, segments, bssStart, bssEnd);
+        if (module.equals("rtld")) {
+            NsoStartupProbe.append(startupTrace, data, segments[0], base);
         }
         ++scannedModules;
         return matches.size();
@@ -181,6 +205,15 @@ final class NsoImportAudit {
         if (singleReferences > 0 || !bindingSlots.isEmpty()) {
             appendBindingTest(output, singleReferences);
         }
+        output.append("\nAwal startup rtld (jejak statis)\n");
+        if (startupTrace.length() == 0) {
+            output.append("Modul rtld belum terverifikasi dalam pemindaian ini.\n");
+        } else {
+            output.append(startupTrace);
+        }
+        if (moduleRanges.length() > 0) {
+            output.append("\nPeta modul (alamat simulasi)\n").append(moduleRanges);
+        }
         if (hasBoundaryEvidence()) {
             appendWeakTest(output, single, named);
             output.append("\nDetail simbol __rel_ di main\n").append(boundaryEvidence)
@@ -205,22 +238,45 @@ final class NsoImportAudit {
         int glob = 0;
         int jump = 0;
         StringBuilder examples = new StringBuilder();
+        StringBuilder skipped = new StringBuilder();
+        int skippedCount = 0;
         for (BindingSlot slot : bindingSlots) {
             List<Export> definitions = candidates.get(slot.name());
-            if (definitions == null || definitions.size() != 1 || targetCounts.get(slot.offset()) != 1) {
+            if (definitions == null || definitions.size() != 1) {
                 continue;
             }
             Export definition = definitions.get(0);
-            if (definition.address() < 0 || (slot.type() == AARCH64_JUMP_SLOT && definition.type() != STT_FUNC)) {
-                continue;
+            String reason = slot.reason();
+            if (reason == null && targetCounts.get(slot.offset()) != 1) {
+                reason = "beberapa relokasi impor menunjuk slot yang sama";
             }
-            long address;
-            try {
-                address = Math.addExact(definition.address(), slot.addend());
-            } catch (ArithmeticException error) {
-                continue;
+            if (reason == null && definition.address() < 0) {
+                reason = definition.type() < 0 ? "definisi dalam modul bertentangan"
+                        : "ekspor di luar cakupan uji (tipe " + definition.type() + ", st_value 0x"
+                                + Long.toHexString(definition.value()) + ')';
             }
-            if (address < 0) {
+            if (reason == null && slot.type() == AARCH64_JUMP_SLOT && definition.type() != STT_FUNC) {
+                reason = "ekspor bertipe " + definition.type() + ", uji JUMP_SLOT memerlukan STT_FUNC";
+            }
+            long address = 0;
+            if (reason == null) {
+                try {
+                    address = Math.addExact(definition.address(), slot.addend());
+                    if (address < 0) {
+                        reason = "hasil alamat negatif";
+                    }
+                } catch (ArithmeticException error) {
+                    reason = "penjumlahan alamat melampaui batas";
+                }
+            }
+            if (reason != null) {
+                if (++skippedCount <= MAX_SKIPPED_SAMPLES) {
+                    skipped.append("  ").append(slot.name()).append(" → ").append(definition.module())
+                            .append(' ').append(NsoRelocations.typeName(slot.type()))
+                            .append(" entri 0x").append(Integer.toHexString(slot.entry()))
+                            .append(" target 0x").append(Long.toHexString(slot.offset()))
+                            .append(" — ").append(reason).append('\n');
+                }
                 continue;
             }
             int position = copies.position();
@@ -241,8 +297,15 @@ final class NsoImportAudit {
         output.append(applied).append(" dari ").append(singleReferences).append(" referensi kandidat tunggal diuji.\n")
                 .append("ABS64 ").append(abs).append(" | GLOB_DAT ").append(glob)
                 .append(" | JUMP_SLOT ").append(jump).append('\n')
-                .append("Referensi kandidat tunggal belum diuji  ").append(singleReferences - applied).append('\n')
-                .append(examples);
+                .append("Referensi kandidat tunggal belum diuji  ").append(singleReferences - applied).append('\n');
+        if (skipped.length() != 0) {
+            output.append("Alasan entri dilewati (maks. ").append(MAX_SKIPPED_SAMPLES).append(")\n").append(skipped);
+        }
+        long uncaptured = singleReferences - applied - skippedCount;
+        if (uncaptured > 0) {
+            output.append("Referensi di luar batas pencatatan  ").append(uncaptured).append('\n');
+        }
+        output.append(examples);
     }
 
     private void appendWeakTest(StringBuilder output, int single, long named) {

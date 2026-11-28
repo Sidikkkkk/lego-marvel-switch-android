@@ -151,7 +151,7 @@ final class NsoImportAudit {
         }
         addModuleLayout(module, base, segments, bssStart, bssEnd);
         if (module.equals("rtld")) {
-            NsoStartupProbe.append(startupTrace, data, segments[0], base);
+            NsoStartupProbe.append(startupTrace, data, segments, base, bssStart, bssEnd);
         }
         ++scannedModules;
         return matches.size();

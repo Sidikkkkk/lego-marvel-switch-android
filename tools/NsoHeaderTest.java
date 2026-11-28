@@ -154,6 +154,7 @@ public final class NsoHeaderTest {
         testImportBindingSimulation();
         testStartupTrace();
         testStartupRegisterSimulation();
+        testStartupMemoryRead();
         System.out.println("NSO checks passed.");
     }
 
@@ -251,6 +252,42 @@ public final class NsoHeaderTest {
         NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
         compareExportModule(provider, audit, "sdk");
         return audit.report();
+    }
+
+    private static void testStartupMemoryRead() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002).putInt(0x108, 0xf100001f)
+                .putInt(0x10c, 0x540000c1).putInt(0x110, 0x2a0103f3).putInt(0x114, 0x94000002)
+                .putInt(0x118, 0x21e8).putInt(0x11c, 0xb94003c0).putInt(0x120, 0x93407c00)
+                .putInt(0x124, 0x8b1e0000).putInt(0x128, 0xf9400005).putInt(0x12c, 0xf100027f);
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld, audit, "rtld");
+        String report = audit.report();
+        require(report.contains("MOV W19, W1 = belum diketahui")
+                && report.contains("0x200000014 BL → 0x20000001c (X30 = 0x200000018)")
+                && report.contains("LDR W0, [X30, #0x0] @0x200000018 = 0x21e8")
+                && report.contains("SXTW X0, W0 = 0x21e8")
+                && report.contains("ADD X0, X0, X30 = 0x200002200 (awal .bss rtld)")
+                && report.contains("LDR X5, [X0, #0x0] @0x200002200 = 0x0")
+                && report.contains("CMP X19, #0x0 — jejak berhenti, nilai register belum diketahui"),
+                "Inline data, tracked unknown handle, and a read within the zeroed BSS buffer");
+
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld.putInt(0x118, 0xffff_fffc), audit, "rtld");
+        report = audit.report();
+        require(report.contains("LDR W0, [X30, #0x0] @0x200000018 = 0xfffffffc")
+                && report.contains("SXTW X0, W0 = 0xfffffffffffffffc")
+                && report.contains("ADD X0, X0, X30 = 0x200000014")
+                && report.contains("@0x200000014 — jejak berhenti, alamat di luar rentang baca rtld yang sejajar"),
+                "Word zero extension, signed extension, and rejection of a misaligned doubleword");
+
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld.putInt(0x118, 0x0fe0), audit, "rtld");
+        require(audit.report().contains("@0x200000ff8 — jejak berhenti, alamat di luar rentang baca rtld yang sejajar"),
+                "A read in a gap between mapped segments must stop even if it fits in the backing array");
     }
 
     private static void testWeakGotSimulation() throws IOException {

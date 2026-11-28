@@ -43,16 +43,36 @@ final class NsoHeader {
     }
 
     static Inspection inspect(InputStream input, long fileLength, long memoryBudget) throws IOException {
-        return inspect(input, fileLength, memoryBudget, false);
+        return inspect(input, fileLength, memoryBudget, false, null, null);
     }
 
     static Inspection inspectWithRelativeTest(InputStream input, long fileLength, long memoryBudget)
             throws IOException {
-        return inspect(input, fileLength, memoryBudget, true);
+        return inspect(input, fileLength, memoryBudget, true, null, null);
+    }
+
+    static String inspectFolderMain(InputStream input, long length, long budget, NsoImportAudit audit)
+            throws IOException {
+        return inspect(input, length, budget, true, audit, null).report();
+    }
+
+    static String inspectExportModule(BufferedInputStream input, long length, long budget,
+                                      NsoImportAudit audit, String name) throws IOException {
+        input.mark(Integer.BYTES);
+        try {
+            if (Integer.reverseBytes(new DataInputStream(input).readInt()) != MAGIC) {
+                return null;
+            }
+        } catch (EOFException error) {
+            return null;
+        }
+        input.reset();
+        return inspect(input, length, budget, false, audit, name).report();
     }
 
     private static Inspection inspect(InputStream input, long fileLength, long memoryBudget,
-                                      boolean testRelativeRelocations) throws IOException {
+                                      boolean testRelativeRelocations, NsoImportAudit audit, String exportModule)
+            throws IOException {
         byte[] bytes = new byte[HEADER_SIZE];
         DataInputStream data = new DataInputStream(new BufferedInputStream(input));
         try {
@@ -107,6 +127,17 @@ final class NsoHeader {
         MemoryLayout memory = memoryLayout(segments, unsignedInt(header, BSS_SIZE_OFFSET));
         byte[] image = allocateImage(memory.rangeEnd, memoryBudget);
         verifySegments(data, segments, image);
+        long symbolOffset = unsignedInt(header, DYNSYM_OFFSET);
+        long symbolSize = unsignedInt(header, DYNSYM_SIZE_OFFSET);
+
+        if (exportModule != null) {
+            if (image == null) {
+                throw new IOException("Buffer RAM di luar batas heap.");
+            }
+            String matches = NsoDynamic.describe(ByteBuffer.wrap(image).asReadOnlyBuffer(), segments,
+                    symbolOffset, symbolSize, memory.bssStart, memory.bssStart + memory.bssSize, audit, exportModule);
+            return new Inspection(matches, null);
+        }
 
         StringBuilder report = new StringBuilder("Segmen NSO0 berhasil diperiksa\nBuild ID  ");
         for (int index = 0x40; index < 0x60; ++index) {
@@ -141,8 +172,7 @@ final class NsoHeader {
             report.append('\n');
             try {
                 report.append(NsoDynamic.describe(testRelativeRelocations ? staged : memoryImage, segments,
-                        unsignedInt(header, DYNSYM_OFFSET), unsignedInt(header, DYNSYM_SIZE_OFFSET),
-                        memory.bssStart, memory.bssStart + memory.bssSize));
+                        symbolOffset, symbolSize, memory.bssStart, memory.bssStart + memory.bssSize, audit, null));
             } catch (InterruptedIOException error) {
                 throw error;
             } catch (IOException error) {

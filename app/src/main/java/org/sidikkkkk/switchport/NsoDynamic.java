@@ -38,16 +38,16 @@ final class NsoDynamic {
     private NsoDynamic() {}
 
     static String describe(ByteBuffer image, NsoHeader.Segment[] segments, long symbolOffset, long symbolSize,
-                           long bssStart, long bssEnd) throws IOException {
+                           long bssStart, long bssEnd, NsoImportAudit audit, String exportModule) throws IOException {
         NsoHeader.Segment text = segments[0];
         if (text.unpackedSize() < 8) {
-            return "MOD0 tidak terdeteksi pada awalan .text.\n";
+            return "MOD0 tidak terdeteksi pada awalan .text." + (exportModule == null ? "\n" : "");
         }
         ByteBuffer data = image.duplicate().order(ByteOrder.LITTLE_ENDIAN);
         long mod0 = text.memoryOffset()
                 + Integer.toUnsignedLong(data.getInt((int) text.memoryOffset() + 4));
         if (regionEnd(segments, mod0, Integer.BYTES) < 0 || data.getInt((int) mod0) != MOD0_MAGIC) {
-            return "MOD0 tidak terdeteksi pada offset dari awalan .text.\n";
+            return "MOD0 tidak terdeteksi pada offset dari awalan .text." + (exportModule == null ? "\n" : "");
         }
         if (regionEnd(segments, mod0, MOD0_HEADER_SIZE) < 0) {
             throw new IOException("Header MOD0 terpotong.");
@@ -63,15 +63,24 @@ final class NsoDynamic {
             checkInterrupted();
             long tag = data.getLong((int) entry);
             if (tag == 0) {
+                NsoRelocations.SymbolTable symbols = symbolTable(data, segments, tags, symbolOffset, symbolSize);
+                if (exportModule != null) {
+                    if (symbols == null) {
+                        return "Batas .dynsym atau .dynstr belum terverifikasi.";
+                    }
+                    return audit.compareExports(exportModule, data, symbols) + " nama impor cocok.";
+                }
                 StringBuilder report = new StringBuilder("Metadata pemuatan MOD0\n")
                         .append("MOD0 0x").append(Long.toHexString(mod0))
                         .append(", .dynamic 0x").append(Long.toHexString(dynamic))
                         .append(" (").append(dynamicCount).append(" entri)\n");
                 appendDependencies(report, data, segments, tags, needed, neededCount);
-                NsoRelocations relocations = new NsoRelocations(data,
-                        symbolTable(data, segments, tags, symbolOffset, symbolSize));
+                NsoRelocations relocations = new NsoRelocations(data, symbols, audit != null);
                 appendRelocations(report, segments, tags, relocations);
                 relocations.appendReport(report);
+                if (audit != null && symbols != null) {
+                    relocations.captureImports(audit);
+                }
                 if (!data.isReadOnly()) {
                     appendRelativeTest(report, data, segments, tags, bssStart, bssEnd);
                 }

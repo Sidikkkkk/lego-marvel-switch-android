@@ -13,11 +13,13 @@ final class NsoRelocations {
     static final int AARCH64_RELATIVE = 1027;
     private static final int MAX_TYPE_ROWS = 24;
     private static final int MAX_IMPORT_SAMPLES = 16;
+    private static final int MAX_TRACKED_IMPORT_INDICES = 4096;
 
     record SymbolTable(long address, long count, long strings, long stringSize) {}
 
     private final ByteBuffer data;
     private final SymbolTable symbols;
+    private final Map<Long, Long> importCounts;
     private final Map<Integer, Long> types = new LinkedHashMap<>();
     private final Set<Long> imports = new LinkedHashSet<>();
     private long otherTypes;
@@ -25,9 +27,10 @@ final class NsoRelocations {
     private long importReferences;
     private long invalidSymbolReferences;
 
-    NsoRelocations(ByteBuffer data, SymbolTable symbols) {
+    NsoRelocations(ByteBuffer data, SymbolTable symbols, boolean captureImports) {
         this.data = data;
         this.symbols = symbols;
+        importCounts = captureImports ? new LinkedHashMap<>() : null;
     }
 
     void scan(long address, long size, int entrySize) throws InterruptedIOException {
@@ -68,7 +71,22 @@ final class NsoRelocations {
             if (imports.size() < MAX_IMPORT_SAMPLES) {
                 imports.add(index);
             }
+            if (importCounts != null && (importCounts.size() < MAX_TRACKED_IMPORT_INDICES
+                    || importCounts.containsKey(index))) {
+                importCounts.merge(index, 1L, Long::sum);
+            }
         }
+    }
+
+    void captureImports(NsoImportAudit audit) throws InterruptedIOException {
+        for (var entry : importCounts.entrySet()) {
+            int offset = (int) (symbols.address + entry.getKey() * SYMBOL_ENTRY_SIZE);
+            String name = NsoImportAudit.exactName(data, symbols, offset);
+            if (name != null) {
+                audit.addImport(name, entry.getValue());
+            }
+        }
+        audit.finishImports(importReferences, invalidSymbolReferences);
     }
 
     void appendReport(StringBuilder report) throws InterruptedIOException {

@@ -153,6 +153,7 @@ public final class NsoHeaderTest {
         testWeakGotSimulation();
         testImportBindingSimulation();
         testStartupTrace();
+        testStartupRegisterSimulation();
         System.out.println("NSO checks passed.");
     }
 
@@ -169,6 +170,17 @@ public final class NsoHeaderTest {
                 && report.contains("imp_func → sdk @0x21d0 = 0x200000020")
                 && main.getLong(0x3c8) == 0xabcdef && main.getLong(0x3d0) == 0x123456,
                 "Unique function definition, signed addend, and preserved source bytes");
+
+        provider.put(0x184, (byte) 0x10);
+        require(bindingReport(main, provider).contains("JUMP_SLOT ke ekspor STT_NOTYPE sejajar di .text  1"),
+                "An aligned executable NOTYPE address is eligible for the numeric slot simulation");
+        require(bindingReport(main, provider.putLong(0x188, 0x2000))
+                .contains("ekspor tipe 0 di st_value 0x2000 tidak menunjukkan instruksi sejajar di .text"),
+                "NOTYPE data never becomes a jump target");
+        require(bindingReport(main, provider.putLong(0x188, 0x21))
+                .contains("ekspor tipe 0 di st_value 0x21 tidak menunjukkan instruksi sejajar di .text"),
+                "A misaligned NOTYPE address never becomes a jump target");
+        provider.put(0x184, (byte) 0x12).putLong(0x188, 0x20);
 
         main.putLong(0x330, (1L << 32) | 257).putLong(0x350, 1);
         report = bindingReport(main, provider);
@@ -207,6 +219,31 @@ public final class NsoHeaderTest {
         compareExportModule(rtld.putInt(0x100, 0x14000010), audit, "rtld");
         require(audit.report().contains("0x200000000 B → 0x200000040\nJejak berhenti. Target di luar .text rtld."),
                 "Branches cannot read past the end of .text");
+    }
+
+    private static void testStartupRegisterSimulation() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002).putInt(0x108, 0xf100001f)
+                .putInt(0x10c, 0x540000c1).putInt(0x110, 0x54000040).putInt(0x118, 0x10000042)
+                .putInt(0x11c, 0x91002043).putInt(0x120, 0xb0000004).putInt(0x124, 0xd4000001);
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld, audit, "rtld");
+        String report = audit.report();
+        require(report.contains("0x200000008 CMP X0, #0x0 (NZCV = 0x6)")
+                && report.contains("0x20000000c B.NE → 0x200000024 (tidak diambil)")
+                && report.contains("0x200000010 B.EQ → 0x200000018 (diambil)")
+                && report.contains("0x200000018 ADR X2 = 0x200000020")
+                && report.contains("0x20000001c ADD X3, X2 = 0x200000028")
+                && report.contains("0x200000020 ADRP X4 = 0x200001000")
+                && report.contains("0x200000024 kata 0xd4000001 — jejak berhenti")
+                && report.contains("Kata .text mulai 0x200000024"),
+                "Flags, taken and untaken branches, register arithmetic, and stop before a system call");
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld.putInt(0x108, 0xf100003f), audit, "rtld");
+        require(audit.report().contains("CMP X1, #0x0 — jejak berhenti, nilai register belum diketahui.")
+                && !audit.report().contains("0x20000000c B.NE"), "Unknown thread handle never picks a branch");
     }
 
     private static String bindingReport(ByteBuffer main, ByteBuffer provider) throws IOException {

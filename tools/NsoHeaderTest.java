@@ -161,6 +161,7 @@ public final class NsoHeaderTest {
         testStartupPairStores();
         testStartupDoublewordPairStores();
         testStartupUnscaledLoadCompare();
+        testStartupPostIndexedLoad();
         System.out.println("NSO checks passed.");
     }
 
@@ -444,6 +445,30 @@ public final class NsoHeaderTest {
         assertStartupStop(main, rtld, 0xeb0103ff, "CMP XZR, X1 — jejak berhenti, nilai register belum diketahui");
         require(startupReport(main, rtld.putInt(0x108, 0x72800001)).contains("MOVK W1 = belum diketahui"),
                 "MOVK cannot infer the bits it preserves from an unknown register");
+    }
+
+    private static void testStartupPostIndexedLoad() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91078108).putInt(0x110, 0xf8410501)
+                .putInt(0x114, 0xf85f0502).putInt(0x118, 0xf9400103).putInt(0x11c, 0xb8404504)
+                .putInt(0x120, 0xf8410508);
+        rtld.putLong(0x3e0, 0x11223344f5667788L).putLong(0x3f0, 0x99aabbccddeeff00L);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDR X1, [X8], #16 @0x2000021e0 = 0x11223344f5667788 (X8 = 0x2000021f0)")
+                && report.contains("LDR X2, [X8], #-16 @0x2000021f0 = 0x99aabbccddeeff00 (X8 = 0x2000021e0)")
+                && report.contains("LDR X3, [X8, #0x0] @0x2000021e0 = 0x11223344f5667788")
+                && report.contains("LDR W4, [X8], #4 @0x2000021e0 = 0xf5667788 (X8 = 0x2000021e4)")
+                && report.contains("LDR X8, [X8], #16 — jejak berhenti, register alamat dan tujuan post-index sama."),
+                "Post-index loads read before writeback, apply signed offsets, and stop on register overlap");
+
+        rtld.putInt(0x110, 0xf8410d01);
+        require(startupReport(main, rtld).contains("kata 0xf8410d01 — jejak berhenti, instruksi di luar cakupan."),
+                "Pre-index loads remain unsupported");
+        rtld.putInt(0x10c, 0xd1002108).putInt(0x110, 0xf8410501);
+        report = startupReport(main, rtld);
+        require(report.contains("LDR X1, [X8], #16 @0x200001ff8 — jejak berhenti")
+                && !report.contains("0x200000014 LDR"), "A load in a segment gap stops before writeback");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

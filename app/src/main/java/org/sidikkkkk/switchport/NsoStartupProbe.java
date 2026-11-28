@@ -66,6 +66,7 @@ final class NsoStartupProbe {
             int opcodeWithoutSf = instruction & 0x7f80_0000;
             boolean registerCompare = (instruction & 0xffe0_fc1f) == 0xeb00_001f;
             boolean unscaledLoad = (instruction & 0xbfe0_0c00) == 0xb840_0000;
+            boolean postIndexedLoad = (instruction & 0xbfe0_0c00) == 0xb840_0400;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
             boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
             boolean pairStore = (instruction & 0x7fc0_0000) == 0x2900_0000;
@@ -170,22 +171,30 @@ final class NsoStartupProbe {
                 long value = wide ? registers[source] : registers[source] & 0xffff_ffffL;
                 report.append("MOV ").append(zeroReg(destination, wide)).append(", ").append(zeroReg(source, wide));
                 writeRegister(report, registers, known, destination, value, known[source]);
-            } else if (unscaledLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
+            } else if (unscaledLoad || postIndexedLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
                 boolean wide = (instruction & 0x4000_0000) != 0;
                 int size = wide ? Long.BYTES : Integer.BYTES;
-                int byteOffset = unscaledLoad ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                boolean signedOffset = unscaledLoad || postIndexedLoad;
+                int byteOffset = signedOffset ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
                 report.append(unscaledLoad ? "LDUR " : "LDR ").append(zeroReg(destination, wide)).append(", [")
-                        .append(reg(source)).append(", #")
-                        .append(unscaledLoad ? Integer.toString(byteOffset) : "0x" + Integer.toHexString(byteOffset))
-                        .append(']');
+                        .append(reg(source)).append(postIndexedLoad ? "], #" : ", #")
+                        .append(signedOffset ? Integer.toString(byteOffset) : "0x" + Integer.toHexString(byteOffset));
+                if (!postIndexedLoad) {
+                    report.append(']');
+                }
                 if (source == 31 || !known[source]) {
                     report.append(" — jejak berhenti, register alamat belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long loadAddress = registers[source] + byteOffset;
+                if (postIndexedLoad && source == destination) {
+                    report.append(" — jejak berhenti, register alamat dan tujuan post-index sama.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long loadAddress = registers[source] + (postIndexedLoad ? 0 : byteOffset);
                 long offset = loadAddress - base;
                 boolean inBss = offset >= bssStart && offset <= bssEnd - size;
                 if (loadAddress < base || (offset & (size - 1)) != 0
@@ -207,6 +216,11 @@ final class NsoStartupProbe {
                 }
                 report.append(" @0x").append(Long.toHexString(loadAddress));
                 writeRegister(report, registers, known, destination, value, true);
+                if (postIndexedLoad) {
+                    registers[source] = loadAddress + byteOffset;
+                    report.append(" (").append(reg(source)).append(" = 0x")
+                            .append(Long.toHexString(registers[source])).append(')');
+                }
             } else if (unsignedStore || unscaledStore || pairStore) {
                 int source = instruction & 31;
                 int secondSource = (instruction >>> 10) & 31;

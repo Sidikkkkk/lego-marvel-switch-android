@@ -2,12 +2,14 @@ package org.sidikkkkk.switchport;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.HashMap;
+import java.util.Map;
 
 final class NsoStartupProbe {
     private static final int BRANCH_MASK = 0xfc00_0000;
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
-    private static final int MAX_STEPS = 32;
+    private static final int MAX_STEPS = 48;
     private static final int NEARBY_WORDS = 12;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};
@@ -56,6 +58,7 @@ final class NsoStartupProbe {
         known[0] = true;
         known[31] = true; // XZR/WZR. The SP encodings check index 31 explicitly.
         Flags flags = null;
+        Map<Long, Byte> bssWrites = new HashMap<>();
         report.append("  Kondisi awal simulasi X0 = 0x0\n");
         for (int step = 0; step < MAX_STEPS; ++step) {
             int instruction = data.getInt((int) pc);
@@ -94,6 +97,25 @@ final class NsoStartupProbe {
                     return;
                 }
                 boolean taken = condition >= 14 || flags.holds(condition);
+                if (taken) {
+                    target = branch;
+                }
+                report.append(taken ? " (diambil)" : " (tidak diambil)");
+            } else if ((instruction & 0x7e00_0000) == 0x3400_0000) {
+                boolean wide = instruction < 0;
+                boolean nonzero = (instruction & 0x0100_0000) != 0;
+                int source = instruction & 31;
+                int imm19 = (instruction >>> 5) & 0x7ffff;
+                long branch = pc + ((imm19 << 13) >> 11);
+                report.append(nonzero ? "CBNZ " : "CBZ ").append(zeroReg(source, wide))
+                        .append(" → 0x").append(Long.toHexString(base + branch));
+                if (!known[source]) {
+                    report.append(" — jejak berhenti, nilai register belum diketahui.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long value = wide ? registers[source] : registers[source] & 0xffff_ffffL;
+                boolean taken = (value != 0) == nonzero;
                 if (taken) {
                     target = branch;
                 }
@@ -153,8 +175,42 @@ final class NsoStartupProbe {
                     return;
                 }
                 long value = wide ? data.getLong((int) offset) : data.getInt((int) offset) & 0xffff_ffffL;
+                if (inBss) {
+                    for (int index = 0; index < size; ++index) {
+                        Byte stored = bssWrites.get(offset + index);
+                        if (stored != null) {
+                            int shift = 8 * index;
+                            value = (value & ~(0xffL << shift)) | ((stored & 0xffL) << shift);
+                        }
+                    }
+                }
                 report.append(" @0x").append(Long.toHexString(loadAddress));
                 writeRegister(report, registers, known, destination, value, true);
+            } else if ((instruction & 0xffc0_0000) == 0x3900_0000
+                    || (instruction & 0xffe0_0c00) == 0x3800_0000) {
+                boolean unscaled = (instruction & 0xffc0_0000) != 0x3900_0000;
+                int source = instruction & 31;
+                int addressRegister = (instruction >>> 5) & 31;
+                int encodedOffset = (instruction >>> 12) & 0x1ff;
+                int immediate = unscaled ? (encodedOffset << 23) >> 23 : (instruction >>> 10) & 0xfff;
+                report.append(unscaled ? "STURB " : "STRB ").append(zeroReg(source, false)).append(", [")
+                        .append(reg(addressRegister)).append(", #").append(immediate).append(']');
+                if (addressRegister == 31 || !known[addressRegister] || !known[source]) {
+                    report.append(" — jejak berhenti, nilai atau alamat simpan belum diketahui.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long storeAddress = registers[addressRegister] + immediate;
+                long offset = storeAddress - base;
+                report.append(" @0x").append(Long.toHexString(storeAddress));
+                if (storeAddress < base || offset < bssStart || offset >= bssEnd) {
+                    report.append(" — jejak berhenti, alamat simpan di luar .bss rtld.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                byte stored = (byte) registers[source];
+                bssWrites.put(offset, stored);
+                report.append(" = 0x").append(Integer.toHexString(stored & 0xff)).append(" (.bss simulasi)");
             } else if ((instruction & 0xffff_fc00) == 0x9340_7c00) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;

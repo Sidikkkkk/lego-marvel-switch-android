@@ -156,6 +156,7 @@ public final class NsoHeaderTest {
         testStartupRegisterSimulation();
         testStartupMemoryRead();
         testStartupCalls();
+        testStartupByteStores();
         System.out.println("NSO checks passed.");
     }
 
@@ -320,6 +321,27 @@ public final class NsoHeaderTest {
             throws IOException {
         String report = startupReport(main, rtld.putInt(0x108, instruction));
         require(report.contains(reason) && !report.contains("0x20000000c ADD"), reason);
+    }
+
+    private static void testStartupByteStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0x528014a1).putInt(0x10c, 0xb4000061).putInt(0x110, 0x35000041)
+                .putInt(0x118, 0xd0000000).putInt(0x11c, 0x91080000).putInt(0x120, 0x39000401)
+                .putInt(0x124, 0x91002008).putInt(0x128, 0x381ff101).putInt(0x12c, 0xf9400002)
+                .putInt(0x130, 0x381ff001);
+        String report = startupReport(main, rtld);
+        require(report.contains("CBZ X1 → 0x200000018 (tidak diambil)")
+                && report.contains("CBNZ W1 → 0x200000018 (diambil)")
+                && report.contains("STRB W1, [X0, #1] @0x200002201 = 0xa5 (.bss simulasi)")
+                && report.contains("STURB W1, [X8, #-1] @0x200002207 = 0xa5 (.bss simulasi)")
+                && report.contains("LDR X2, [X0, #0x0] @0x200002200 = 0xa50000000000a500")
+                && report.contains("@0x2000021ff — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Compare branches, signed store offset, little-endian overlay, and the lower BSS boundary");
+
+        rtld.putInt(0x124, 0x91008008).putInt(0x128, 0x39000101);
+        require(startupReport(main, rtld).contains("@0x200002220 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "The byte at the exclusive BSS end is not writable");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

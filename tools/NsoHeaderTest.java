@@ -165,6 +165,7 @@ public final class NsoHeaderTest {
         testStartupInstructionBudget();
         testStartupWordImmediateCompare();
         testStartupRegisterOffsetStore();
+        testStartupStackFrame();
         System.out.println("NSO checks passed.");
     }
 
@@ -525,6 +526,33 @@ public final class NsoHeaderTest {
         rtld.putInt(0x118, 0xf829790a);
         require(startupReport(main, rtld).contains("kata 0xf829790a — jejak berhenti, instruksi di luar cakupan."),
                 "Scaled register-offset stores remain unsupported");
+    }
+
+    private static void testStartupStackFrame() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd10083ff).putInt(0x10c, 0xd2868ac2)
+                .putInt(0x110, 0xa9010be2).putInt(0x114, 0xa90107e2)
+                .putInt(0x118, 0x910043fd).putInt(0x11c, 0xf94003a3).putInt(0x120, 0xf9400fe4)
+                .putInt(0x124, 0xf84207e5).putInt(0x128, 0xf94003a6);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB SP, SP = 0x7ffeffffffe0")
+                && report.contains("STP X2, X2, [SP, #16] @0x7ffefffffff0 = 0x3456, 0x3456 (stack simulasi)")
+                && report.contains("STP X2, X1, [SP, #16] @0x7ffefffffff0 = 0x3456, belum diketahui (stack simulasi)")
+                && report.contains("ADD X29, SP = 0x7ffefffffff0")
+                && report.contains("LDR X3, [X29, #0x0] @0x7ffefffffff0 = 0x3456")
+                && report.contains("LDR X4, [SP, #0x18] @0x7ffefffffff8 = belum diketahui")
+                && report.contains("LDR X5, [SP], #32 @0x7ffeffffffe0 = belum diketahui (SP = 0x7fff00000000)")
+                && report.contains("LDR X6, [X29, #0x0] @0x7ffefffffff0 — jejak berhenti"),
+                "Stack frames preserve unknown saves, support frame-pointer reads, and reject inactive addresses");
+        rtld.putInt(0x124, 0xf84207ff);
+        require(startupReport(main, rtld).contains("LDR XZR, [SP], #32 @0x7ffeffffffe0 (hasil dibuang) (SP = 0x7fff00000000)"),
+                "SP and XZR are distinct during writeback");
+        rtld.putInt(0x114, 0xa90187e2);
+        require(startupReport(main, rtld).contains("alamat simpan di luar stack simulasi aktif."),
+                "A pair store must fit entirely inside the active stack");
+        assertStartupStop(main, rtld, 0xd10023ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
+        assertStartupStop(main, rtld, 0xd14047ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

@@ -11,6 +11,8 @@ final class NsoStartupProbe {
     private static final int BL = 0x9400_0000;
     private static final int MAX_STEPS = 1024;
     private static final int NEARBY_WORDS = 12;
+    private static final long STACK_TOP = 0x7fff_0000_0000L;
+    private static final long STACK_BOTTOM = STACK_TOP - 64 * 1024;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};
 
@@ -59,14 +61,16 @@ final class NsoStartupProbe {
             report.append("Titik masuk .text tidak berisi instruksi AArch64 4 byte yang sejajar.\n");
             return;
         }
-        // On the normal process entry path, X0 is zero. X1 (thread handle) and SP remain unknown.
+        // X0 is zero on the normal entry path. The thread handle and incoming stack bytes are unknown.
         long[] registers = new long[32];
         boolean[] known = new boolean[32];
         known[0] = true;
         known[31] = true; // XZR/WZR. The SP encodings check index 31 explicitly.
+        long stackPointer = STACK_TOP;
         Flags flags = null;
         Map<Long, Byte> memoryWrites = new HashMap<>();
         report.append("  Kondisi awal simulasi X0 = 0x0\n");
+        report.append("  SP sintetis = 0x").append(Long.toHexString(stackPointer)).append('\n');
         for (int step = 0; step < MAX_STEPS; ++step) {
             int instruction = data.getInt((int) pc);
             int opcode = instruction & BRANCH_MASK;
@@ -166,15 +170,24 @@ final class NsoStartupProbe {
                 int destination = instruction & 31;
                 boolean subtract = (instruction & 0x4000_0000) != 0;
                 report.append(subtract ? "SUB " : "ADD ").append(reg(destination)).append(", ").append(reg(source));
-                if (source == 31 || destination == 31 || !known[source]) {
+                if (source != 31 && !known[source]) {
                     report.append(" — jejak berhenti, register atau SP belum dapat dimodelkan.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
                 int immediate = immediate12(instruction);
-                registers[destination] = registers[source] + (subtract ? -immediate : immediate);
-                known[destination] = true;
-                report.append(" = 0x").append(Long.toHexString(registers[destination]));
+                long value = (source == 31 ? stackPointer : registers[source]) + (subtract ? -immediate : immediate);
+                if (destination == 31) {
+                    if (!validStackPointer(value)) {
+                        report.append(" — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte.\n");
+                        appendWords(report, data, pc, lastInstruction, base);
+                        return;
+                    }
+                    stackPointer = value;
+                    report.append(" = 0x").append(Long.toHexString(stackPointer));
+                } else {
+                    writeRegister(report, registers, known, destination, value, true);
+                }
             } else if ((instruction & 0x7fe0_ffe0) == 0x2a00_03e0) {
                 int source = (instruction >>> 16) & 31;
                 int destination = instruction & 31;
@@ -195,40 +208,59 @@ final class NsoStartupProbe {
                 if (!postIndexedLoad) {
                     report.append(']');
                 }
-                if (source == 31 || !known[source]) {
+                if (source != 31 && !known[source]) {
                     report.append(" — jejak berhenti, register alamat belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                if (postIndexedLoad && source == destination) {
+                if (postIndexedLoad && source != 31 && source == destination) {
                     report.append(" — jejak berhenti, register alamat dan tujuan post-index sama.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long loadAddress = registers[source] + (postIndexedLoad ? 0 : byteOffset);
+                long addressRegisterValue = source == 31 ? stackPointer : registers[source];
+                long loadAddress = addressRegisterValue + (postIndexedLoad ? 0 : byteOffset);
                 long offset = loadAddress - base;
+                boolean inStack = inActiveStack(loadAddress, size, stackPointer);
                 boolean inBss = offset >= bssStart && offset <= bssEnd - size;
-                if (loadAddress < base || (offset & (size - 1)) != 0
-                        || (!inBss && NsoDynamic.regionEnd(segments, offset, size) < 0)) {
+                boolean inModule = source != 31 && loadAddress >= base
+                        && (inBss || NsoDynamic.regionEnd(segments, offset, size) >= 0);
+                if ((loadAddress & (size - 1)) != 0 || (!inStack && !inModule)) {
                     report.append(" @0x").append(Long.toHexString(loadAddress))
                             .append(" — jejak berhenti, alamat di luar rentang baca rtld yang sejajar.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long value = wide ? data.getLong((int) offset) : data.getInt((int) offset) & 0xffff_ffffL;
+                long writeback = loadAddress + byteOffset;
+                if (postIndexedLoad && source == 31 && !validStackPointer(writeback)) {
+                    report.append(" — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long value = 0;
+                if (!inStack) {
+                    value = wide ? data.getLong((int) offset) : data.getInt((int) offset) & 0xffff_ffffL;
+                }
+                boolean valueKnown = true;
                 for (int index = 0; index < size; ++index) {
-                    Byte stored = memoryWrites.get(offset + index);
+                    Byte stored = memoryWrites.get(loadAddress + index);
                     if (stored != null) {
                         int shift = Byte.SIZE * index;
                         value = (value & ~(0xffL << shift)) | ((stored & 0xffL) << shift);
+                    } else if (inStack) {
+                        valueKnown = false;
                     }
                 }
                 report.append(" @0x").append(Long.toHexString(loadAddress));
-                writeRegister(report, registers, known, destination, value, true);
+                writeRegister(report, registers, known, destination, value, valueKnown);
                 if (postIndexedLoad) {
-                    registers[source] = loadAddress + byteOffset;
+                    if (source == 31) {
+                        stackPointer = writeback;
+                    } else {
+                        registers[source] = writeback;
+                    }
                     report.append(" (").append(reg(source)).append(" = 0x")
-                            .append(Long.toHexString(registers[source])).append(')');
+                            .append(Long.toHexString(writeback)).append(')');
                 }
             } else if (unsignedStore || unscaledStore || pairStore || registerOffsetStore) {
                 int source = instruction & 31;
@@ -262,23 +294,27 @@ final class NsoStartupProbe {
                     report.append('#').append(byteOffset);
                 }
                 report.append(']');
-                if (addressRegister == 31 || !known[addressRegister] || !known[source]
-                        || (pairStore && !known[secondSource]) || (registerOffsetStore && !known[offsetRegister])) {
+                long addressRegisterValue = addressRegister == 31 ? stackPointer : registers[addressRegister];
+                long storeAddress = addressRegisterValue + byteOffset;
+                int totalSize = pairStore ? 2 * size : size;
+                boolean inStack = inActiveStack(storeAddress, totalSize, stackPointer);
+                boolean valuesKnown = known[source] && (!pairStore || known[secondSource]);
+                if ((addressRegister != 31 && !known[addressRegister])
+                        || (registerOffsetStore && !known[offsetRegister])
+                        || (addressRegister != 31 && !inStack && !valuesKnown)) {
                     report.append(" — jejak berhenti, nilai atau alamat simpan belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long storeAddress = registers[addressRegister] + byteOffset;
                 long offset = storeAddress - base;
-                int totalSize = pairStore ? 2 * size : size;
                 report.append(" @0x").append(Long.toHexString(storeAddress));
                 boolean inBss = offset >= bssStart && offset <= bssEnd - totalSize;
                 boolean inData = registerOffsetStore && offset >= writableData.memoryOffset()
                         && offset <= writableData.memoryEnd() - totalSize;
-                if (storeAddress < base || (!inBss && !inData)) {
-                    report.append(registerOffsetStore
-                            ? " — jejak berhenti, alamat simpan di luar .data atau .bss rtld.\n"
-                            : " — jejak berhenti, alamat simpan di luar .bss rtld.\n");
+                if (!inStack && (addressRegister == 31 || storeAddress < base || (!inBss && !inData))) {
+                    String region = addressRegister == 31 ? "stack simulasi aktif" : registerOffsetStore
+                            ? ".data atau .bss rtld" : ".bss rtld";
+                    report.append(" — jejak berhenti, alamat simpan di luar ").append(region).append(".\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
@@ -287,13 +323,14 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                report.append(" = 0x");
-                appendStoreValue(report, memoryWrites, offset, registers[source], size);
+                report.append(" = ");
+                appendStoreValue(report, memoryWrites, storeAddress, registers[source], size, known[source]);
                 if (pairStore) {
-                    report.append(", 0x");
-                    appendStoreValue(report, memoryWrites, offset + size, registers[secondSource], size);
+                    report.append(", ");
+                    appendStoreValue(report, memoryWrites, storeAddress + size, registers[secondSource], size,
+                            known[secondSource]);
                 }
-                report.append(inData ? " (.data simulasi)" : " (.bss simulasi)");
+                report.append(inStack ? " (stack simulasi)" : inData ? " (.data simulasi)" : " (.bss simulasi)");
             } else if ((instruction & 0xffc0_0000) == 0xb340_0000) {
                 int immr = (instruction >>> 16) & 63;
                 int imms = (instruction >>> 10) & 63;
@@ -411,18 +448,28 @@ final class NsoStartupProbe {
         appendWords(report, data, pc, lastInstruction, base);
     }
 
+    private static boolean validStackPointer(long address) {
+        return address >= STACK_BOTTOM && address <= STACK_TOP && (address & 15) == 0;
+    }
+
+    private static boolean inActiveStack(long address, int size, long stackPointer) {
+        return address >= stackPointer && address <= STACK_TOP - size;
+    }
+
     private static void appendStoreValue(StringBuilder report, Map<Long, Byte> memoryWrites,
-                                         long offset, long value, int size) {
-        long stored = switch (size) {
-            case 1 -> value & 0xffL;
-            case Integer.BYTES -> value & 0xffff_ffffL;
-            case Long.BYTES -> value;
-            default -> throw new IllegalArgumentException("Unsupported store size: " + size);
-        };
-        for (int index = 0; index < size; ++index) {
-            memoryWrites.put(offset + index, (byte) (stored >>> (Byte.SIZE * index)));
+                                         long address, long value, int size, boolean known) {
+        if (!known) {
+            for (int index = 0; index < size; ++index) {
+                memoryWrites.remove(address + index);
+            }
+            report.append("belum diketahui");
+            return;
         }
-        report.append(Long.toHexString(stored));
+        for (int index = 0; index < size; ++index) {
+            memoryWrites.put(address + index, (byte) (value >>> (Byte.SIZE * index)));
+        }
+        int shift = Long.SIZE - Byte.SIZE * size;
+        report.append("0x").append(Long.toHexString((value << shift) >>> shift));
     }
 
     private static int immediate12(int instruction) {

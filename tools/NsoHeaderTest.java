@@ -152,6 +152,7 @@ public final class NsoHeaderTest {
         testRelocationBoundaryEvidence();
         testWeakGotSimulation();
         testImportBindingSimulation();
+        testStartupTrace();
         System.out.println("NSO checks passed.");
     }
 
@@ -172,7 +173,8 @@ public final class NsoHeaderTest {
         main.putLong(0x330, (1L << 32) | 257).putLong(0x350, 1);
         report = bindingReport(main, provider);
         require(report.contains("1 dari 2 referensi kandidat tunggal diuji.")
-                && report.contains("ABS64 1 | GLOB_DAT 0 | JUMP_SLOT 0"),
+                && report.contains("ABS64 1 | GLOB_DAT 0 | JUMP_SLOT 0")
+                && report.contains("R_AARCH64_JUMP_SLOT entri 0x2140 target 0x21d0 — addend JUMP_SLOT bukan nol (1)"),
                 "ABS64 is simulated while JUMP_SLOT with a nonzero addend is skipped");
 
         main.putLong(0x350, 0).putLong(0x340, 0x21c8);
@@ -184,6 +186,27 @@ public final class NsoHeaderTest {
         provider.putLong(0x188, 0x20).putInt(0x198, 18).put(0x19c, (byte) 0x12).putLong(0x1a0, 0x24);
         require(bindingReport(main, provider).contains("0 dari 2 referensi kandidat tunggal diuji."),
                 "A single module with conflicting exports is not used");
+    }
+
+    private static void testStartupTrace() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002).putInt(0x108, 0x94000003)
+                .putInt(0x114, 0x17ffffff).putInt(0x110, 0xd503201f);
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld, audit, "rtld");
+        String report = audit.report();
+        require(report.contains("0x200000000 B → 0x200000008\n  0x200000008 BL → 0x200000014 (X30 = 0x20000000c)")
+                && report.contains("0x200000014 B → 0x200000010\n  0x200000010 kata 0xd503201f — jejak berhenti")
+                && report.contains("main basis 0x100000000\n    .text [0x100000000, 0x100000040)")
+                && report.contains("rtld basis 0x200000000\n    .text [0x200000000, 0x200000040)"),
+                "Branch sign extension, link register, unsupported instruction, and shared simulated bases");
+
+        audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(rtld.putInt(0x100, 0x14000010), audit, "rtld");
+        require(audit.report().contains("0x200000000 B → 0x200000040\nJejak berhenti. Target di luar .text rtld."),
+                "Branches cannot read past the end of .text");
     }
 
     private static String bindingReport(ByteBuffer main, ByteBuffer provider) throws IOException {

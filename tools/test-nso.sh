@@ -10,5 +10,6 @@ javac --release 17 -d "$classes" \
     "$root/app/src/main/java/org/sidikkkkk/switchport/NsoHeader.java" \
     "$root/app/src/main/java/org/sidikkkkk/switchport/NsoImportAudit.java" \
     "$root/app/src/main/java/org/sidikkkkk/switchport/NsoRelocations.java" \
+    "$root/app/src/main/java/org/sidikkkkk/switchport/NsoStartupProbe.java" \
     "$root/tools/NsoHeaderTest.java"
 java -cp "$classes" org.sidikkkkk.switchport.NsoHeaderTest "$@"

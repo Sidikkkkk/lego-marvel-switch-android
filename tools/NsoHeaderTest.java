@@ -159,6 +159,7 @@ public final class NsoHeaderTest {
         testStartupByteStores();
         testStartupWordStores();
         testStartupPairStores();
+        testStartupDoublewordPairStores();
         System.out.println("NSO checks passed.");
     }
 
@@ -394,6 +395,23 @@ public final class NsoHeaderTest {
         rtld.putInt(0x11c, 0x29808901);
         require(startupReport(main, rtld).contains("kata 0x29808901 — jejak berhenti, instruksi di luar cakupan."),
                 "Pair stores with writeback remain unsupported");
+    }
+
+    private static void testStartupDoublewordPairStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000)
+                .putInt(0x110, 0x528014a1).putInt(0x114, 0x52824682).putInt(0x118, 0xb3607c41)
+                .putInt(0x11c, 0x91008008).putInt(0x120, 0xd1002108).putInt(0x124, 0xa93f8901)
+                .putInt(0x128, 0xf9400803).putInt(0x12c, 0xf9400c04).putInt(0x130, 0xa9000901);
+        String report = startupReport(main, rtld);
+        require(report.contains("BFI X1, X2, #32, #32 = 0x1234000000a5")
+                && report.contains("SUB X8, X8 = 0x200002218")
+                && report.contains("STP X1, X2, [X8, #-8] @0x200002210 = 0x1234000000a5, 0x1234 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x10] @0x200002210 = 0x1234000000a5")
+                && report.contains("LDR X4, [X0, #0x18] @0x200002218 = 0x1234")
+                && report.contains("STP X1, X2, [X8, #0] @0x200002218 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "BFI preserves low bits, pair stores retain high bits, and the full 16-byte range is checked");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

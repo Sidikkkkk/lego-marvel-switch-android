@@ -9,7 +9,7 @@ final class NsoStartupProbe {
     private static final int BRANCH_MASK = 0xfc00_0000;
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
-    private static final int MAX_STEPS = 96;
+    private static final int MAX_STEPS = 128;
     private static final int NEARBY_WORDS = 12;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
             "HI", "LS", "GE", "LT", "GT", "LE", "AL", "NV"};
@@ -66,7 +66,7 @@ final class NsoStartupProbe {
             int logicalOpcode = instruction & 0x7f80_0000;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
             boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
-            boolean pairStore = (instruction & 0xffc0_0000) == 0x2900_0000;
+            boolean pairStore = (instruction & 0x7fc0_0000) == 0x2900_0000;
             long address = base + pc;
             long target = pc + Integer.BYTES;
             report.append("  0x").append(Long.toHexString(address)).append(' ');
@@ -136,16 +136,18 @@ final class NsoStartupProbe {
                     registers[destination] = value;
                     known[destination] = true;
                 }
-            } else if ((instruction & 0xff80_0000) == 0x9100_0000) {
+            } else if ((instruction & 0xbf80_0000) == 0x9100_0000) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
-                report.append("ADD ").append(reg(destination)).append(", ").append(reg(source));
+                boolean subtract = (instruction & 0x4000_0000) != 0;
+                report.append(subtract ? "SUB " : "ADD ").append(reg(destination)).append(", ").append(reg(source));
                 if (source == 31 || destination == 31 || !known[source]) {
                     report.append(" — jejak berhenti, register atau SP belum dapat dimodelkan.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                registers[destination] = registers[source] + immediate12(instruction);
+                int immediate = immediate12(instruction);
+                registers[destination] = registers[source] + (subtract ? -immediate : immediate);
                 known[destination] = true;
                 report.append(" = 0x").append(Long.toHexString(registers[destination]));
             } else if ((instruction & 0x7fe0_ffe0) == 0x2a00_03e0) {
@@ -191,17 +193,20 @@ final class NsoStartupProbe {
                 report.append(" @0x").append(Long.toHexString(loadAddress));
                 writeRegister(report, registers, known, destination, value, true);
             } else if (unsignedStore || unscaledStore || pairStore) {
-                int size = pairStore || instruction < 0 ? Integer.BYTES : 1;
                 int source = instruction & 31;
                 int secondSource = (instruction >>> 10) & 31;
                 int addressRegister = (instruction >>> 5) & 31;
+                int size;
                 int immediate;
                 if (pairStore) {
+                    boolean wide = instruction < 0;
+                    size = wide ? Long.BYTES : Integer.BYTES;
                     int scaledOffset = (instruction << 10) >> 25; // Signed imm7 in bits 21:15.
                     immediate = scaledOffset * size;
-                    report.append("STP ").append(zeroReg(source, false)).append(", ")
-                            .append(zeroReg(secondSource, false));
+                    report.append("STP ").append(zeroReg(source, wide)).append(", ")
+                            .append(zeroReg(secondSource, wide));
                 } else {
+                    size = instruction < 0 ? Integer.BYTES : 1;
                     int encodedOffset = (instruction >>> 12) & 0x1ff;
                     immediate = unscaledStore ? (encodedOffset << 23) >> 23 : ((instruction >>> 10) & 0xfff) * size;
                     report.append(unscaledStore ? "STUR" : "STR").append(size == 1 ? "B " : " ")
@@ -235,6 +240,24 @@ final class NsoStartupProbe {
                     appendStoreValue(report, bssWrites, offset + size, registers[secondSource], size);
                 }
                 report.append(" (.bss simulasi)");
+            } else if ((instruction & 0xffc0_0000) == 0xb340_0000) {
+                int immr = (instruction >>> 16) & 63;
+                int imms = (instruction >>> 10) & 63;
+                int source = (instruction >>> 5) & 31;
+                int destination = instruction & 31;
+                if (immr <= imms || source == 31) {
+                    report.append("BFM — jejak berhenti, hanya bentuk BFI 64-bit yang didukung.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                int lsb = Long.SIZE - immr;
+                int width = imms + 1;
+                long fieldMask = (1L << width) - 1;
+                long value = (registers[destination] & ~(fieldMask << lsb))
+                        | ((registers[source] & fieldMask) << lsb);
+                report.append("BFI ").append(zeroReg(destination, true)).append(", ").append(zeroReg(source, true))
+                        .append(", #").append(lsb).append(", #").append(width);
+                writeRegister(report, registers, known, destination, value, known[source] && known[destination]);
             } else if ((instruction & 0xffff_fc00) == 0x9340_7c00) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
@@ -330,7 +353,12 @@ final class NsoStartupProbe {
 
     private static void appendStoreValue(StringBuilder report, Map<Long, Byte> bssWrites,
                                          long offset, long value, int size) {
-        long stored = value & (size == 1 ? 0xffL : 0xffff_ffffL);
+        long stored = switch (size) {
+            case 1 -> value & 0xffL;
+            case Integer.BYTES -> value & 0xffff_ffffL;
+            case Long.BYTES -> value;
+            default -> throw new IllegalArgumentException("Unsupported store size: " + size);
+        };
         for (int index = 0; index < size; ++index) {
             bssWrites.put(offset + index, (byte) (stored >>> (Byte.SIZE * index)));
         }

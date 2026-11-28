@@ -22,6 +22,7 @@ final class NsoImportAudit {
     private static final int SHN_UNDEF = 0;
     private static final int SHN_XINDEX = 0xffff;
     private static final int SHN_LORESERVE = 0xff00;
+    private static final int STT_NOTYPE = 0;
     private static final int STT_FUNC = 2;
     private static final int MAX_NAME_BYTES = 1024;
     private static final int MAX_MISSING_NAMES = 20;
@@ -31,7 +32,7 @@ final class NsoImportAudit {
 
     private record WeakSlot(long offset, long original) {}
     record BindingSlot(String name, int entry, long offset, int type, long addend, long original, String reason) {}
-    private record Export(String module, long address, int type, long value) {}
+    private record Export(String module, long address, int type, long value, boolean inText) {}
 
     private final Map<String, WeakSlot> weakSlots = new LinkedHashMap<>();
     private final List<BindingSlot> bindingSlots = new ArrayList<>();
@@ -130,17 +131,19 @@ final class NsoImportAudit {
             if (name != null && imports.containsKey(name)) {
                 int type = data.get(entry + 4) & 0xf;
                 long value = data.getLong(entry + 8);
+                NsoHeader.Segment text = segments[0];
+                boolean inText = value >= text.memoryOffset() && value <= text.memoryEnd() - Integer.BYTES
+                        && (value & 3) == 0;
                 boolean mapped = NsoDynamic.regionEnd(segments, value, 1) >= 0
                         || (value >= bssStart && value < bssEnd);
                 if (type == STT_FUNC) {
-                    mapped = value >= segments[0].memoryOffset() && value < segments[0].memoryEnd()
-                            && (value & 3) == 0;
+                    mapped = inText;
                 }
-                boolean supported = mapped && segments[0].memoryOffset() == 0 && type <= STT_FUNC
+                boolean supported = mapped && text.memoryOffset() == 0 && type <= STT_FUNC
                         && section < SHN_LORESERVE && (data.get(entry + 5) & 0xfc) == 0;
-                Export definition = new Export(module, supported ? base + value : -1, type, value);
+                Export definition = new Export(module, supported ? base + value : -1, type, value, inText);
                 matches.merge(name, definition, (first, second) -> first.equals(second)
-                        ? first : new Export(module, -1, -1, 0));
+                        ? first : new Export(module, -1, -1, 0, false));
             }
         }
         for (var entry : matches.entrySet()) {
@@ -205,7 +208,7 @@ final class NsoImportAudit {
         if (singleReferences > 0 || !bindingSlots.isEmpty()) {
             appendBindingTest(output, singleReferences);
         }
-        output.append("\nAwal startup rtld (jejak statis)\n");
+        output.append("\nAwal startup rtld (simulasi instruksi)\n");
         if (startupTrace.length() == 0) {
             output.append("Modul rtld belum terverifikasi dalam pemindaian ini.\n");
         } else {
@@ -237,6 +240,7 @@ final class NsoImportAudit {
         int abs = 0;
         int glob = 0;
         int jump = 0;
+        int jumpNoType = 0;
         StringBuilder examples = new StringBuilder();
         StringBuilder skipped = new StringBuilder();
         int skippedCount = 0;
@@ -255,8 +259,10 @@ final class NsoImportAudit {
                         : "ekspor di luar cakupan uji (tipe " + definition.type() + ", st_value 0x"
                                 + Long.toHexString(definition.value()) + ')';
             }
-            if (reason == null && slot.type() == AARCH64_JUMP_SLOT && definition.type() != STT_FUNC) {
-                reason = "ekspor bertipe " + definition.type() + ", uji JUMP_SLOT memerlukan STT_FUNC";
+            if (reason == null && slot.type() == AARCH64_JUMP_SLOT && definition.type() != STT_FUNC
+                    && (definition.type() != STT_NOTYPE || !definition.inText())) {
+                reason = "ekspor tipe " + definition.type() + " di st_value 0x"
+                        + Long.toHexString(definition.value()) + " tidak menunjukkan instruksi sejajar di .text";
             }
             long address = 0;
             if (reason == null) {
@@ -290,7 +296,12 @@ final class NsoImportAudit {
             switch (slot.type()) {
                 case AARCH64_ABS64 -> ++abs;
                 case AARCH64_GLOB_DAT -> ++glob;
-                case AARCH64_JUMP_SLOT -> ++jump;
+                case AARCH64_JUMP_SLOT -> {
+                    ++jump;
+                    if (definition.type() == STT_NOTYPE) {
+                        ++jumpNoType;
+                    }
+                }
             }
         }
         int applied = abs + glob + jump;
@@ -298,6 +309,9 @@ final class NsoImportAudit {
                 .append("ABS64 ").append(abs).append(" | GLOB_DAT ").append(glob)
                 .append(" | JUMP_SLOT ").append(jump).append('\n')
                 .append("Referensi kandidat tunggal belum diuji  ").append(singleReferences - applied).append('\n');
+        if (jumpNoType != 0) {
+            output.append("JUMP_SLOT ke ekspor STT_NOTYPE sejajar di .text  ").append(jumpNoType).append('\n');
+        }
         if (skipped.length() != 0) {
             output.append("Alasan entri dilewati (maks. ").append(MAX_SKIPPED_SAMPLES).append(")\n").append(skipped);
         }

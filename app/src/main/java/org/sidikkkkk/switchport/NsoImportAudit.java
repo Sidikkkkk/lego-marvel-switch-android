@@ -2,6 +2,7 @@ package org.sidikkkkk.switchport;
 
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -19,6 +20,12 @@ final class NsoImportAudit {
     private static final int MAX_NAME_BYTES = 1024;
     private static final int MAX_MISSING_NAMES = 20;
     private static final int MAX_AMBIGUOUS_NAMES = 10;
+
+    private record WeakSlot(long offset, long original) {}
+
+    private final Map<String, WeakSlot> weakSlots = new LinkedHashMap<>();
+    private boolean exportScanFailed;
+    private int scannedModules;
 
     private final Map<String, Long> imports = new LinkedHashMap<>();
     private final Map<String, List<String>> candidates = new LinkedHashMap<>();
@@ -42,6 +49,14 @@ final class NsoImportAudit {
 
     void addBoundaryEvidence(String row) {
         boundaryEvidence.append(row);
+    }
+
+    void addWeakSlot(String name, long offset, long original) {
+        weakSlots.put(name, new WeakSlot(offset, original));
+    }
+
+    void noteExportScanFailure() {
+        exportScanFailed = true;
     }
 
     boolean hasBoundaryEvidence() {
@@ -83,6 +98,7 @@ final class NsoImportAudit {
         for (String name : matches) {
             candidates.computeIfAbsent(name, key -> new ArrayList<>()).add(module);
         }
+        ++scannedModules;
         return matches.size();
     }
 
@@ -133,10 +149,51 @@ final class NsoImportAudit {
                     .append(ambiguousExamples);
         }
         if (hasBoundaryEvidence()) {
+            appendWeakTest(output, single, named);
             output.append("\nDetail simbol __rel_ di main\n").append(boundaryEvidence)
                     .append("Rentang tabel relokasi main (offset)\n").append(tableRanges);
         }
         return output.toString();
+    }
+
+    private void appendWeakTest(StringBuilder output, int single, long named) {
+        output.append("\nSimulasi GOT weak (ELF, salinan slot .data)\n");
+        if (exportScanFailed || scannedModules == 0) {
+            output.append("Uji dilewati. Pemindaian ekspor modul belum lengkap.\n");
+            return;
+        }
+
+        Map<String, WeakSlot> eligible = new LinkedHashMap<>();
+        Set<Long> offsets = new LinkedHashSet<>();
+        for (var entry : weakSlots.entrySet()) {
+            String name = entry.getKey();
+            WeakSlot slot = entry.getValue();
+            if (imports.get(name) != 1 || candidates.containsKey(name)) {
+                continue;
+            }
+            if (!offsets.add(slot.offset())) {
+                output.append("Uji dilewati. Beberapa simbol menunjuk slot yang sama.\n");
+                return;
+            }
+            eligible.put(name, slot);
+        }
+        if (single + eligible.size() != imports.size() || named != references || invalidReferences != 0) {
+            output.append("Uji dilewati. Masih ada impor lain yang belum punya satu kandidat.\n");
+            return;
+        }
+
+        ByteBuffer copies = ByteBuffer.allocate(eligible.size() * Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        for (var entry : eligible.entrySet()) {
+            WeakSlot slot = entry.getValue();
+            int position = copies.position();
+            copies.putLong(slot.original());
+            long before = copies.getLong(position);
+            copies.putLong(position, 0L); // S = 0 for an unresolved weak reference. A was verified as zero.
+            output.append("  ").append(entry.getKey()).append(" @0x").append(Long.toHexString(slot.offset()))
+                    .append("  0x").append(Long.toHexString(before)).append(" → 0x")
+                    .append(Long.toHexString(copies.getLong(position))).append('\n');
+        }
+        output.append(eligible.size()).append(" slot diuji.\n");
     }
 
     static String exactName(ByteBuffer data, NsoRelocations.SymbolTable symbols, int entry)

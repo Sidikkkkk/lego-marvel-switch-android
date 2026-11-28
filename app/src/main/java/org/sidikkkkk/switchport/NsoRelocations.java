@@ -11,6 +11,8 @@ import java.util.Set;
 final class NsoRelocations {
     static final int SYMBOL_ENTRY_SIZE = 24;
     static final int AARCH64_RELATIVE = 1027;
+    private static final int AARCH64_GLOB_DAT = 1025;
+    private static final int STB_WEAK = 2;
     private static final int MAX_TYPE_ROWS = 24;
     private static final int MAX_IMPORT_SAMPLES = 16;
     private static final int MAX_TRACKED_IMPORT_INDICES = 4096;
@@ -96,7 +98,7 @@ final class NsoRelocations {
         }
     }
 
-    void captureImports(NsoImportAudit audit) throws InterruptedIOException {
+    void captureImports(NsoImportAudit audit, NsoHeader.Segment writableData) throws InterruptedIOException {
         for (var entry : importUses.entrySet()) {
             int offset = (int) (symbols.address + entry.getKey() * SYMBOL_ENTRY_SIZE);
             String name = NsoImportAudit.exactName(data, symbols, offset);
@@ -105,10 +107,26 @@ final class NsoRelocations {
                 audit.addImport(name, use.count);
                 if (isRelocationBoundaryName(name)) {
                     audit.addBoundaryEvidence(describeBoundary(name, entry.getKey(), offset, use));
+                    captureWeakSlot(audit, name, offset, use, writableData);
                 }
             }
         }
         audit.finishImports(importReferences, invalidSymbolReferences);
+    }
+
+    private void captureWeakSlot(NsoImportAudit audit, String name, int symbol, ImportUse use,
+                                 NsoHeader.Segment writableData) {
+        int entry = use.firstEntry;
+        if (use.count != 1 || !use.table.equals("RELA") || data.get(symbol + 4) != (STB_WEAK << 4)
+                || data.get(symbol + 5) != 0 || data.getLong(symbol + 8) != 0
+                || data.getInt(entry + Long.BYTES) != AARCH64_GLOB_DAT || data.getLong(entry + 2 * Long.BYTES) != 0) {
+            return;
+        }
+        long target = data.getLong(entry);
+        if ((target & (Long.BYTES - 1)) == 0 && target >= writableData.memoryOffset()
+                && target <= writableData.memoryEnd() - Long.BYTES) {
+            audit.addWeakSlot(name, target, data.getLong((int) target));
+        }
     }
 
     private static boolean isRelocationBoundaryName(String name) {
@@ -123,7 +141,7 @@ final class NsoRelocations {
         String binding = switch (info >>> 4) {
             case 0 -> "STB_LOCAL";
             case 1 -> "STB_GLOBAL";
-            case 2 -> "STB_WEAK";
+            case STB_WEAK -> "STB_WEAK";
             default -> "binding " + (info >>> 4);
         };
         int entry = use.firstEntry;
@@ -193,7 +211,7 @@ final class NsoRelocations {
             case 257 -> "R_AARCH64_ABS64";
             case 580 -> "R_AARCH64_AUTH_ABS64";
             case 1024 -> "R_AARCH64_COPY";
-            case 1025 -> "R_AARCH64_GLOB_DAT";
+            case AARCH64_GLOB_DAT -> "R_AARCH64_GLOB_DAT";
             case 1026 -> "R_AARCH64_JUMP_SLOT";
             case AARCH64_RELATIVE -> "R_AARCH64_RELATIVE";
             case 1028 -> "R_AARCH64_TLS_IMPDEF1";

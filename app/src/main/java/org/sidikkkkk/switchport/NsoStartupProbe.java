@@ -10,7 +10,7 @@ final class NsoStartupProbe {
     private static final int B = 0x1400_0000;
     private static final int BL = 0x9400_0000;
     private static final int MAX_STEPS = 1024;
-    private static final int NEARBY_WORDS = 12;
+    private static final int NEARBY_WORDS = 32;
     private static final long STACK_TOP = 0x7fff_0000_0000L;
     private static final long STACK_BOTTOM = STACK_TOP - 64 * 1024;
     private static final String[] CONDITIONS = {"EQ", "NE", "CS", "CC", "MI", "PL", "VS", "VC",
@@ -78,6 +78,8 @@ final class NsoStartupProbe {
             int registerBranchOpcode = instruction & 0xffff_fc1f;
             boolean registerCompare = (instruction & 0xffe0_fc1f) == 0xeb00_001f;
             boolean byteRegisterLoad = (instruction & 0xffe0_fc00) == 0x3860_6800;
+            boolean byteImmediateLoad = (instruction & 0xffc0_0000) == 0x3940_0000;
+            boolean pairLoad = (instruction & 0x7fc0_0000) == 0x2940_0000;
             boolean unscaledLoad = (instruction & 0xbfe0_0c00) == 0xb840_0000;
             boolean postIndexedLoad = (instruction & 0xbfe0_0c00) == 0xb840_0400;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
@@ -199,24 +201,33 @@ final class NsoStartupProbe {
                 long value = wide ? registers[source] : registers[source] & 0xffff_ffffL;
                 report.append("MOV ").append(zeroReg(destination, wide)).append(", ").append(zeroReg(source, wide));
                 writeRegister(report, registers, known, destination, value, known[source]);
-            } else if (byteRegisterLoad || unscaledLoad || postIndexedLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
+            } else if (byteRegisterLoad || byteImmediateLoad || pairLoad || unscaledLoad || postIndexedLoad
+                    || (instruction & 0xbfc0_0000) == 0xb940_0000) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
+                int secondDestination = (instruction >>> 10) & 31;
                 int offsetRegister = (instruction >>> 16) & 31;
-                boolean wide = (instruction & 0x4000_0000) != 0;
+                boolean wide = pairLoad ? instruction < 0 : (instruction & 0x4000_0000) != 0;
                 int size;
                 long byteOffset;
-                if (byteRegisterLoad) {
+                if (pairLoad) {
+                    size = wide ? Long.BYTES : Integer.BYTES;
+                    byteOffset = ((instruction << 10) >> 25) * size;
+                    report.append("LDP ").append(zeroReg(destination, wide)).append(", ")
+                            .append(zeroReg(secondDestination, wide)).append(", [").append(reg(source))
+                            .append(", #").append(byteOffset).append(']');
+                } else if (byteRegisterLoad) {
                     size = Byte.BYTES;
                     byteOffset = registers[offsetRegister];
                     report.append("LDRB ").append(zeroReg(destination, false)).append(", [")
                             .append(reg(source)).append(", ").append(zeroReg(offsetRegister, true)).append(']');
                 } else {
-                    size = wide ? Long.BYTES : Integer.BYTES;
+                    size = byteImmediateLoad ? Byte.BYTES : wide ? Long.BYTES : Integer.BYTES;
                     boolean signedOffset = unscaledLoad || postIndexedLoad;
                     int immediate = signedOffset ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
                     byteOffset = immediate;
-                    report.append(unscaledLoad ? "LDUR " : "LDR ").append(zeroReg(destination, wide)).append(", [")
+                    String mnemonic = byteImmediateLoad ? "LDRB " : unscaledLoad ? "LDUR " : "LDR ";
+                    report.append(mnemonic).append(zeroReg(destination, wide)).append(", [")
                             .append(reg(source)).append(postIndexedLoad ? "], #" : ", #")
                             .append(signedOffset ? Integer.toString(immediate) : "0x" + Integer.toHexString(immediate));
                     if (!postIndexedLoad) {
@@ -233,13 +244,19 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
+                if (pairLoad && destination == secondDestination) {
+                    report.append(" — jejak berhenti, kedua register tujuan LDP sama.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
                 long addressRegisterValue = source == 31 ? stackPointer : registers[source];
                 long loadAddress = addressRegisterValue + (postIndexedLoad ? 0 : byteOffset);
                 long offset = loadAddress - base;
-                boolean inStack = inActiveStack(loadAddress, size, stackPointer);
-                boolean inBss = offset >= bssStart && offset <= bssEnd - size;
+                int totalSize = pairLoad ? 2 * size : size;
+                boolean inStack = inActiveStack(loadAddress, totalSize, stackPointer);
+                boolean inBss = offset >= bssStart && offset <= bssEnd - totalSize;
                 boolean inModule = source != 31 && loadAddress >= base
-                        && (inBss || NsoDynamic.regionEnd(segments, offset, size) >= 0);
+                        && (inBss || NsoDynamic.regionEnd(segments, offset, totalSize) >= 0);
                 boolean allowUnaligned = inBss && !unscaledLoad && !postIndexedLoad;
                 boolean aligned = (loadAddress & (size - 1)) == 0;
                 if ((!aligned && !allowUnaligned) || (!inStack && !inModule)) {
@@ -254,27 +271,15 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                long value = 0;
-                if (!inStack) {
-                    value = switch (size) {
-                        case Byte.BYTES -> Byte.toUnsignedLong(data.get((int) offset));
-                        case Integer.BYTES -> Integer.toUnsignedLong(data.getInt((int) offset));
-                        case Long.BYTES -> data.getLong((int) offset);
-                        default -> throw new IllegalArgumentException("Unsupported load size: " + size);
-                    };
-                }
-                boolean valueKnown = true;
-                for (int index = 0; index < size; ++index) {
-                    Byte stored = memoryWrites.get(loadAddress + index);
-                    if (stored != null) {
-                        int shift = Byte.SIZE * index;
-                        value = (value & ~(0xffL << shift)) | ((stored & 0xffL) << shift);
-                    } else if (inStack) {
-                        valueKnown = false;
-                    }
-                }
+                Long value = readValue(data, memoryWrites, base, loadAddress, size, inStack);
+                Long secondValue = pairLoad ? readValue(data, memoryWrites, base, loadAddress + size, size, inStack) : null;
                 report.append(" @0x").append(Long.toHexString(loadAddress));
-                writeRegister(report, registers, known, destination, value, valueKnown);
+                writeRegister(report, registers, known, destination, value == null ? 0 : value, value != null);
+                if (pairLoad) {
+                    report.append(", ").append(zeroReg(secondDestination, wide));
+                    writeRegister(report, registers, known, secondDestination,
+                            secondValue == null ? 0 : secondValue, secondValue != null);
+                }
                 if (postIndexedLoad) {
                     if (source == 31) {
                         stackPointer = writeback;
@@ -514,6 +519,32 @@ final class NsoStartupProbe {
         }
         report.append("Jejak berhenti setelah ").append(MAX_STEPS).append(" instruksi.\n");
         appendWords(report, data, pc, lastInstruction, base);
+    }
+
+    private static Long readValue(ByteBuffer data, Map<Long, Byte> memoryWrites, long base,
+                                  long address, int size, boolean inStack) {
+        long value = 0;
+        if (!inStack) {
+            int offset = (int) (address - base);
+            value = switch (size) {
+                case Byte.BYTES -> Byte.toUnsignedLong(data.get(offset));
+                case Integer.BYTES -> Integer.toUnsignedLong(data.getInt(offset));
+                case Long.BYTES -> data.getLong(offset);
+                default -> throw new IllegalArgumentException("Unsupported load size: " + size);
+            };
+        }
+        for (int index = 0; index < size; ++index) {
+            Byte stored = memoryWrites.get(address + index);
+            if (stored == null) {
+                if (inStack) {
+                    return null;
+                }
+                continue;
+            }
+            int shift = Byte.SIZE * index;
+            value = (value & ~(0xffL << shift)) | (Byte.toUnsignedLong(stored) << shift);
+        }
+        return value;
     }
 
     private static boolean validStackPointer(long address) {

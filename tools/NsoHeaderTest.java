@@ -170,6 +170,8 @@ public final class NsoHeaderTest {
         testStartupDoublewordImmediateStores();
         testStartupRegisterBranchTable();
         testStartupConditionalSet();
+        testStartupStackReturn();
+        testStartupInstructionWindow();
         System.out.println("NSO checks passed.");
     }
 
@@ -661,6 +663,54 @@ public final class NsoHeaderTest {
         rtld.putInt(0x108, 0x1a9fe7e4);
         require(startupReport(main, rtld).contains("kata 0x1a9fe7e4 — jejak berhenti, instruksi di luar cakupan."),
                 "An unconditional CSINC encoding is not decoded as CSET");
+    }
+
+    private static void testStartupStackReturn() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000008).putInt(0x10c, 0x91080108).putInt(0x110, 0x94000003)
+                .putInt(0x114, 0xd2800849).putInt(0x118, 0x1400000a).putInt(0x11c, 0xd10083ff)
+                .putInt(0x120, 0xd2801fe2).putInt(0x124, 0xa90107fe).putInt(0x128, 0x39000d02)
+                .putInt(0x12c, 0x39400d03).putInt(0x130, 0xd280001e).putInt(0x134, 0xa94113fe)
+                .putInt(0x138, 0xf84207e5).putInt(0x13c, 0xd65f03c0);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDRB W3, [X8, #0x3] @0x200002203 = 0xff")
+                && report.contains("0x200000030 MOVZ X30 = 0x0")
+                && report.contains("LDP X30, X4, [SP, #16] @0x7ffefffffff0 = 0x200000014, X4 = belum diketahui")
+                && report.contains("LDR X5, [SP], #32 @0x7ffeffffffe0 = belum diketahui (SP = 0x7fff00000000)")
+                && report.contains("RET X30 → 0x200000014")
+                && report.contains("0x200000014 MOVZ X9 = 0x42"),
+                "A byte read sees the store, and the epilogue restores the saved return address and SP");
+        rtld.putInt(0x134, 0xa9417bfe);
+        report = startupReport(main, rtld);
+        require(report.contains("LDP X30, X30, [SP, #16] — jejak berhenti, kedua register tujuan LDP sama.")
+                && !report.contains("0x200000038 LDR"), "Duplicate LDP destinations stop before register updates");
+        rtld.putInt(0x134, 0xa94193fe);
+        report = startupReport(main, rtld);
+        require(report.contains("LDP X30, X4, [SP, #24] @0x7ffefffffff8 — jejak berhenti")
+                && !report.contains("0x200000038 LDR"), "Both elements must fit in the active stack");
+
+        rtld.putInt(0x10c, 0x91082108).putInt(0x110, 0x297f9504).putInt(0x114, 0);
+        require(startupReport(main, rtld).contains("LDP W4, W5, [X8, #-4] @0x200002204 = 0x0, W5 = 0x0"),
+                "A word pair uses a signed offset scaled by four");
+    }
+
+    private static void testStartupInstructionWindow() {
+        ByteBuffer image = ByteBuffer.allocate(0x100).asReadOnlyBuffer();
+        NsoHeader.Segment[] segments = {
+                new NsoHeader.Segment(".text", 0, 0, 0, 0x100, false, null),
+                new NsoHeader.Segment(".rodata", 0, 0, 0x100, 0, false, null),
+                new NsoHeader.Segment(".data", 0, 0, 0x100, 0, false, null)
+        };
+        StringBuilder report = new StringBuilder();
+        NsoStartupProbe.append(report, image, segments, 0x2_0000_0000L, 0x100, 0x100);
+        require(report.toString().endsWith("    " + " 0x0".repeat(32) + "\n"),
+                "A stopped trace exports a bounded 32-word window");
+        segments[0] = new NsoHeader.Segment(".text", 0, 0, 0, 12, false, null);
+        report.setLength(0);
+        NsoStartupProbe.append(report, image, segments, 0x2_0000_0000L, 0x100, 0x100);
+        require(report.toString().endsWith("    " + " 0x0".repeat(3) + "\n"),
+                "The diagnostic window ends at the last complete text instruction");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

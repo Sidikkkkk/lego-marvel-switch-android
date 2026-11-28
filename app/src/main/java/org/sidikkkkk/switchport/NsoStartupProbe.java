@@ -225,7 +225,9 @@ final class NsoStartupProbe {
                 boolean inBss = offset >= bssStart && offset <= bssEnd - size;
                 boolean inModule = source != 31 && loadAddress >= base
                         && (inBss || NsoDynamic.regionEnd(segments, offset, size) >= 0);
-                if ((loadAddress & (size - 1)) != 0 || (!inStack && !inModule)) {
+                boolean allowUnaligned = inBss && !unscaledLoad && !postIndexedLoad;
+                boolean aligned = (loadAddress & (size - 1)) == 0;
+                if ((!aligned && !allowUnaligned) || (!inStack && !inModule)) {
                     report.append(" @0x").append(Long.toHexString(loadAddress))
                             .append(" — jejak berhenti, alamat di luar rentang baca rtld yang sejajar.\n");
                     appendWords(report, data, pc, lastInstruction, base);
@@ -318,7 +320,7 @@ final class NsoStartupProbe {
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                if ((storeAddress & (size - 1)) != 0) {
+                if ((storeAddress & (size - 1)) != 0 && !(pairStore && inBss)) {
                     report.append(" — jejak berhenti, alamat simpan tidak sejajar.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;

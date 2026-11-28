@@ -166,6 +166,7 @@ public final class NsoHeaderTest {
         testStartupWordImmediateCompare();
         testStartupRegisterOffsetStore();
         testStartupStackFrame();
+        testStartupUnalignedBssSlots();
         System.out.println("NSO checks passed.");
     }
 
@@ -553,6 +554,27 @@ public final class NsoHeaderTest {
                 "A pair store must fit entirely inside the active stack");
         assertStartupStop(main, rtld, 0xd10023ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
         assertStartupStop(main, rtld, 0xd14047ff, "SP di luar stack simulasi atau tidak sejajar 16 byte");
+    }
+
+    private static void testStartupUnalignedBssSlots() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91081000)
+                .putInt(0x110, 0xd2977541).putInt(0x114, 0xd2866442)
+                .putInt(0x118, 0xa9000801).putInt(0x11c, 0xf9400003).putInt(0x120, 0xf9400404)
+                .putInt(0x124, 0x91001005).putInt(0x128, 0xf94000a6);
+        String report = startupReport(main, rtld);
+        require(report.contains("STP X1, X2, [X0, #0] @0x200002204 = 0xbbaa, 0x3322 (.bss simulasi)")
+                && report.contains("LDR X3, [X0, #0x0] @0x200002204 = 0xbbaa")
+                && report.contains("LDR X4, [X0, #0x8] @0x20000220c = 0x3322")
+                && report.contains("LDR X6, [X5, #0x0] @0x200002208 = 0x332200000000"),
+                "Unaligned pair slots preserve both elements and little-endian readback across the boundary");
+        rtld.putInt(0x10c, 0x91085000);
+        require(startupReport(main, rtld).contains("STP X1, X2, [X0, #0] @0x200002214 — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "An unaligned pair store needs its full 16-byte range");
+        rtld.putInt(0x10c, 0x91087000).putInt(0x118, 0xf9400003);
+        require(startupReport(main, rtld).contains("LDR X3, [X0, #0x0] @0x20000221c — jejak berhenti"),
+                "An unaligned doubleword load cannot cross the end of BSS");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

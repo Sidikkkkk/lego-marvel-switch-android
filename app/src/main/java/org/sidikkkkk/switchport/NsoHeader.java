@@ -43,6 +43,16 @@ final class NsoHeader {
     }
 
     static Inspection inspect(InputStream input, long fileLength, long memoryBudget) throws IOException {
+        return inspect(input, fileLength, memoryBudget, false);
+    }
+
+    static Inspection inspectWithRelativeTest(InputStream input, long fileLength, long memoryBudget)
+            throws IOException {
+        return inspect(input, fileLength, memoryBudget, true);
+    }
+
+    private static Inspection inspect(InputStream input, long fileLength, long memoryBudget,
+                                      boolean testRelativeRelocations) throws IOException {
         byte[] bytes = new byte[HEADER_SIZE];
         DataInputStream data = new DataInputStream(new BufferedInputStream(input));
         try {
@@ -123,13 +133,16 @@ final class NsoHeader {
                 .append(")  ").append(memory.rangeEnd).append(" byte\n")
                 .append("Segmen dan .bss  ").append(memory.usedSize).append(" byte\n")
                 .append("Celah dalam rentang  ").append(memory.rangeEnd - memory.usedSize).append(" byte\n");
-        ByteBuffer memoryImage = image == null ? null : ByteBuffer.wrap(image).asReadOnlyBuffer();
+        ByteBuffer memoryImage = null;
         if (image != null) {
+            ByteBuffer staged = ByteBuffer.wrap(image);
+            memoryImage = staged.asReadOnlyBuffer();
             report.append("\nMuat segmen ke buffer RAM berhasil (").append(image.length).append(" byte).\n");
             report.append('\n');
             try {
-                report.append(NsoDynamic.describe(memoryImage, segments,
-                        unsignedInt(header, DYNSYM_OFFSET), unsignedInt(header, DYNSYM_SIZE_OFFSET)));
+                report.append(NsoDynamic.describe(testRelativeRelocations ? staged : memoryImage, segments,
+                        unsignedInt(header, DYNSYM_OFFSET), unsignedInt(header, DYNSYM_SIZE_OFFSET),
+                        memory.bssStart, memory.bssStart + memory.bssSize));
             } catch (InterruptedIOException error) {
                 throw error;
             } catch (IOException error) {

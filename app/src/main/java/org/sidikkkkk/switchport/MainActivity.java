@@ -81,7 +81,7 @@ public final class MainActivity extends Activity {
                 Runtime runtime = Runtime.getRuntime();
                 long usedHeap = runtime.totalMemory() - runtime.freeMemory();
                 long memoryBudget = Math.max(0L, runtime.maxMemory() - usedHeap) / 2;
-                return NsoHeader.inspect(input, file.getLength(), memoryBudget).report();
+                return NsoHeader.inspectWithRelativeTest(input, file.getLength(), memoryBudget).report();
             }
         } catch (IOException | SecurityException error) {
             String message = error.getMessage();

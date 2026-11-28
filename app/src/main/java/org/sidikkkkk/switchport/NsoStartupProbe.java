@@ -63,6 +63,9 @@ final class NsoStartupProbe {
         for (int step = 0; step < MAX_STEPS; ++step) {
             int instruction = data.getInt((int) pc);
             int opcode = instruction & BRANCH_MASK;
+            int logicalOpcode = instruction & 0x7f80_0000;
+            boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
+            boolean unscaledStore = (instruction & 0x7fe0_0c00) == 0x3800_0000;
             long address = base + pc;
             long target = pc + Integer.BYTES;
             report.append("  0x").append(Long.toHexString(address)).append(' ');
@@ -186,14 +189,14 @@ final class NsoStartupProbe {
                 }
                 report.append(" @0x").append(Long.toHexString(loadAddress));
                 writeRegister(report, registers, known, destination, value, true);
-            } else if ((instruction & 0xffc0_0000) == 0x3900_0000
-                    || (instruction & 0xffe0_0c00) == 0x3800_0000) {
-                boolean unscaled = (instruction & 0xffc0_0000) != 0x3900_0000;
+            } else if (unsignedStore || unscaledStore) {
+                int size = instruction < 0 ? Integer.BYTES : 1;
                 int source = instruction & 31;
                 int addressRegister = (instruction >>> 5) & 31;
                 int encodedOffset = (instruction >>> 12) & 0x1ff;
-                int immediate = unscaled ? (encodedOffset << 23) >> 23 : (instruction >>> 10) & 0xfff;
-                report.append(unscaled ? "STURB " : "STRB ").append(zeroReg(source, false)).append(", [")
+                int immediate = unscaledStore ? (encodedOffset << 23) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                report.append(unscaledStore ? "STUR" : "STR").append(size == 1 ? "B " : " ")
+                        .append(zeroReg(source, false)).append(", [")
                         .append(reg(addressRegister)).append(", #").append(immediate).append(']');
                 if (addressRegister == 31 || !known[addressRegister] || !known[source]) {
                     report.append(" — jejak berhenti, nilai atau alamat simpan belum diketahui.\n");
@@ -203,33 +206,71 @@ final class NsoStartupProbe {
                 long storeAddress = registers[addressRegister] + immediate;
                 long offset = storeAddress - base;
                 report.append(" @0x").append(Long.toHexString(storeAddress));
-                if (storeAddress < base || offset < bssStart || offset >= bssEnd) {
+                if (storeAddress < base || offset < bssStart || offset > bssEnd - size) {
                     report.append(" — jejak berhenti, alamat simpan di luar .bss rtld.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
-                byte stored = (byte) registers[source];
-                bssWrites.put(offset, stored);
-                report.append(" = 0x").append(Integer.toHexString(stored & 0xff)).append(" (.bss simulasi)");
+                if ((storeAddress & (size - 1)) != 0) {
+                    report.append(" — jejak berhenti, alamat simpan tidak sejajar.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                long stored = registers[source] & (size == 1 ? 0xffL : 0xffff_ffffL);
+                for (int index = 0; index < size; ++index) {
+                    bssWrites.put(offset + index, (byte) (stored >>> (Byte.SIZE * index)));
+                }
+                report.append(" = 0x").append(Long.toHexString(stored)).append(" (.bss simulasi)");
             } else if ((instruction & 0xffff_fc00) == 0x9340_7c00) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
                 report.append("SXTW ").append(zeroReg(destination, true)).append(", ").append(zeroReg(source, false));
                 writeRegister(report, registers, known, destination, (int) registers[source], known[source]);
-            } else if ((instruction & 0xbfe0_fc00) == 0x8b00_0000) {
+            } else if ((instruction & 0x3fe0_fc00) == 0x0b00_0000) {
                 int left = (instruction >>> 5) & 31;
                 int right = (instruction >>> 16) & 31;
                 int destination = instruction & 31;
+                boolean wide = instruction < 0;
                 boolean subtract = (instruction & 0x4000_0000) != 0;
                 long value = subtract ? registers[left] - registers[right] : registers[left] + registers[right];
+                if (!wide) {
+                    value &= 0xffff_ffffL;
+                }
                 boolean valueKnown = known[left] && known[right];
                 report.append(subtract ? "SUB " : "ADD ")
-                        .append(zeroReg(destination, true)).append(", ").append(zeroReg(left, true))
-                        .append(", ").append(zeroReg(right, true));
+                        .append(zeroReg(destination, wide)).append(", ").append(zeroReg(left, wide))
+                        .append(", ").append(zeroReg(right, wide));
                 writeRegister(report, registers, known, destination, value, valueKnown);
-                if (destination != 31 && valueKnown && bssEnd > bssStart && value == base + bssStart) {
+                if (wide && destination != 31 && valueKnown && bssEnd > bssStart && value == base + bssStart) {
                     report.append(" (awal .bss rtld)");
                 }
+            } else if (logicalOpcode == 0x1200_0000 || logicalOpcode == 0x3200_0000) {
+                boolean wide = instruction < 0;
+                boolean and = logicalOpcode == 0x1200_0000;
+                int source = (instruction >>> 5) & 31;
+                int destination = instruction & 31;
+                report.append(and ? "AND " : "ORR ");
+                Long mask = logicalImmediateMask(instruction, wide ? Long.SIZE : Integer.SIZE);
+                if (mask == null || destination == 31) {
+                    report.append(mask == null ? "— jejak berhenti, encoding mask tidak valid.\n"
+                            : "— jejak berhenti, SP belum dapat dimodelkan.\n");
+                    appendWords(report, data, pc, lastInstruction, base);
+                    return;
+                }
+                report.append(zeroReg(destination, wide)).append(", ").append(zeroReg(source, wide))
+                        .append(", #0x").append(Long.toHexString(mask));
+                long value = and ? registers[source] & mask : registers[source] | mask;
+                writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL, known[source]);
+            } else if ((instruction & 0x7fe0_fc00) == 0x1b00_7c00) {
+                boolean wide = instruction < 0;
+                int left = (instruction >>> 5) & 31;
+                int right = (instruction >>> 16) & 31;
+                int destination = instruction & 31;
+                report.append("MUL ").append(zeroReg(destination, wide)).append(", ").append(zeroReg(left, wide))
+                        .append(", ").append(zeroReg(right, wide));
+                long value = registers[left] * registers[right];
+                writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL,
+                        known[left] && known[right]);
             } else if ((instruction & 0x7f80_0000) == 0x5280_0000) {
                 boolean wide = instruction < 0;
                 int destination = instruction & 31;
@@ -276,6 +317,33 @@ final class NsoStartupProbe {
     private static int immediate12(int instruction) {
         int value = (instruction >>> 10) & 0xfff;
         return (instruction & 0x0040_0000) == 0 ? value : value << 12;
+    }
+
+    private static Long logicalImmediateMask(int instruction, int width) {
+        int n = (instruction >>> 22) & 1;
+        int imms = (instruction >>> 10) & 63;
+        int immr = (instruction >>> 16) & 63;
+        int length = 31 - Integer.numberOfLeadingZeros((n << 6) | (~imms & 63));
+        if (length < 1 || (1 << length) > width) {
+            return null;
+        }
+        int elementSize = 1 << length;
+        int levels = elementSize - 1;
+        int lastSetBit = imms & levels;
+        if (lastSetBit == levels) {
+            return null;
+        }
+        int rotation = immr & levels;
+        long element = (1L << (lastSetBit + 1)) - 1;
+        if (rotation != 0) {
+            long elementMask = elementSize == Long.SIZE ? -1L : (1L << elementSize) - 1;
+            element = ((element >>> rotation) | (element << (elementSize - rotation))) & elementMask;
+        }
+        long mask = 0;
+        for (int shift = 0; shift < width; shift += elementSize) {
+            mask |= element << shift;
+        }
+        return mask;
     }
 
     private static String reg(int index) {

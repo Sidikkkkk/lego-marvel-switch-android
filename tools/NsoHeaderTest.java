@@ -157,6 +157,7 @@ public final class NsoHeaderTest {
         testStartupMemoryRead();
         testStartupCalls();
         testStartupByteStores();
+        testStartupWordStores();
         System.out.println("NSO checks passed.");
     }
 
@@ -342,6 +343,36 @@ public final class NsoHeaderTest {
         rtld.putInt(0x124, 0x91008008).putInt(0x128, 0x39000101);
         require(startupReport(main, rtld).contains("@0x200002220 — jejak berhenti, alamat simpan di luar .bss rtld."),
                 "The byte at the exclusive BSS end is not writable");
+    }
+
+    private static void testStartupWordStores() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xd0000000).putInt(0x10c, 0x91080000).putInt(0x110, 0x528014a1)
+                .putInt(0x114, 0x4b0003e8).putInt(0x118, 0x12001c29).putInt(0x11c, 0x3200c3ea)
+                .putInt(0x120, 0x1b0a7d29).putInt(0x124, 0xb9000409).putInt(0x128, 0xb8000009)
+                .putInt(0x12c, 0xf9400002).putInt(0x130, 0x927ef44a).putInt(0x134, 0xb801e009);
+        String report = startupReport(main, rtld);
+        require(report.contains("SUB W8, WZR, W0 = 0xffffde00")
+                && report.contains("AND W9, W1, #0xff = 0xa5")
+                && report.contains("ORR W10, WZR, #0x1010101 = 0x1010101")
+                && report.contains("MUL W9, W9, W10 = 0xa5a5a5a5")
+                && report.contains("STR W9, [X0, #4] @0x200002204 = 0xa5a5a5a5 (.bss simulasi)")
+                && report.contains("STUR W9, [X0, #0] @0x200002200 = 0xa5a5a5a5 (.bss simulasi)")
+                && report.contains("LDR X2, [X0, #0x0] @0x200002200 = 0xa5a5a5a5a5a5a5a5")
+                && report.contains("AND X10, X2, #0xfffffffffffffffc = 0xa5a5a5a5a5a5a5a4")
+                && report.contains("@0x20000221e — jejak berhenti, alamat simpan di luar .bss rtld."),
+                "Word arithmetic, replicated and rotated masks, readback, and a store crossing the BSS end");
+
+        rtld.putInt(0x134, 0xb8001009);
+        require(startupReport(main, rtld).contains("@0x200002201 — jejak berhenti, alamat simpan tidak sejajar."),
+                "The startup probe stops at an unaligned word store");
+        rtld.putInt(0x11c, 0x3240c3ea);
+        require(startupReport(main, rtld).contains("ORR — jejak berhenti, encoding mask tidak valid."),
+                "A 32-bit logical immediate cannot set N");
+        rtld.putInt(0x11c, 0x3200c3ff);
+        require(startupReport(main, rtld).contains("ORR — jejak berhenti, SP belum dapat dimodelkan."),
+                "A logical immediate with Rd 31 writes SP rather than the zero register");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

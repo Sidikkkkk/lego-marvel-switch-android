@@ -151,7 +151,46 @@ public final class NsoHeaderTest {
         testImportAudit();
         testRelocationBoundaryEvidence();
         testWeakGotSimulation();
+        testImportBindingSimulation();
         System.out.println("NSO checks passed.");
+    }
+
+    private static void testImportBindingSimulation() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        main.put(0x184, (byte) 0x12).putLong(0x328, 0x21c8).putLong(0x338, -8).putLong(0x340, 0x21d0);
+        main.putLong(0x3c8, 0xabcdef).putLong(0x3d0, 0x123456);
+        ByteBuffer provider = relocationFixture().put(0x184, (byte) 0x12).putShort(0x186, (short) 1);
+        provider.putLong(0x188, 0x20);
+        String report = bindingReport(main, provider);
+        require(report.contains("2 dari 2 referensi kandidat tunggal diuji.")
+                && report.contains("ABS64 0 | GLOB_DAT 1 | JUMP_SLOT 1")
+                && report.contains("imp_func → sdk @0x21c8 = 0x200000018")
+                && report.contains("imp_func → sdk @0x21d0 = 0x200000020")
+                && main.getLong(0x3c8) == 0xabcdef && main.getLong(0x3d0) == 0x123456,
+                "Unique function definition, signed addend, and preserved source bytes");
+
+        main.putLong(0x330, (1L << 32) | 257).putLong(0x350, 1);
+        report = bindingReport(main, provider);
+        require(report.contains("1 dari 2 referensi kandidat tunggal diuji.")
+                && report.contains("ABS64 1 | GLOB_DAT 0 | JUMP_SLOT 0"),
+                "ABS64 is simulated while JUMP_SLOT with a nonzero addend is skipped");
+
+        main.putLong(0x350, 0).putLong(0x340, 0x21c8);
+        require(bindingReport(main, provider).contains("0 dari 2 referensi kandidat tunggal diuji."),
+                "Conflicting offsets are not used");
+        main.putLong(0x340, 0x21d0);
+        require(bindingReport(main, provider.putLong(0x188, 0x9000))
+                .contains("0 dari 2 referensi kandidat tunggal diuji."), "Export address must be mapped");
+        provider.putLong(0x188, 0x20).putInt(0x198, 18).put(0x19c, (byte) 0x12).putLong(0x1a0, 0x24);
+        require(bindingReport(main, provider).contains("0 dari 2 referensi kandidat tunggal diuji."),
+                "A single module with conflicting exports is not used");
+    }
+
+    private static String bindingReport(ByteBuffer main, ByteBuffer provider) throws IOException {
+        NsoImportAudit audit = new NsoImportAudit();
+        NsoHeader.inspectFolderMain(new ByteArrayInputStream(main.array()), main.capacity(), 0x2220, audit);
+        compareExportModule(provider, audit, "sdk");
+        return audit.report();
     }
 
     private static void testWeakGotSimulation() throws IOException {

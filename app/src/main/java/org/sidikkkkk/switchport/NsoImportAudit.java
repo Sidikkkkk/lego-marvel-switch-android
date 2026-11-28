@@ -1,5 +1,9 @@
 package org.sidikkkkk.switchport;
 
+import static org.sidikkkkk.switchport.NsoRelocations.AARCH64_ABS64;
+import static org.sidikkkkk.switchport.NsoRelocations.AARCH64_GLOB_DAT;
+import static org.sidikkkkk.switchport.NsoRelocations.AARCH64_JUMP_SLOT;
+
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -17,18 +21,24 @@ final class NsoImportAudit {
     private static final int STV_PROTECTED = 3;
     private static final int SHN_UNDEF = 0;
     private static final int SHN_XINDEX = 0xffff;
+    private static final int SHN_LORESERVE = 0xff00;
+    private static final int STT_FUNC = 2;
     private static final int MAX_NAME_BYTES = 1024;
     private static final int MAX_MISSING_NAMES = 20;
     private static final int MAX_AMBIGUOUS_NAMES = 10;
+    private static final int MAX_BINDING_SAMPLES = 4;
 
     private record WeakSlot(long offset, long original) {}
+    private record BindingSlot(String name, long offset, int type, long addend, long original) {}
+    private record Export(String module, long address, int type) {}
 
     private final Map<String, WeakSlot> weakSlots = new LinkedHashMap<>();
+    private final List<BindingSlot> bindingSlots = new ArrayList<>();
     private boolean exportScanFailed;
     private int scannedModules;
 
     private final Map<String, Long> imports = new LinkedHashMap<>();
-    private final Map<String, List<String>> candidates = new LinkedHashMap<>();
+    private final Map<String, List<Export>> candidates = new LinkedHashMap<>();
     private final StringBuilder boundaryEvidence = new StringBuilder();
     private final StringBuilder tableRanges = new StringBuilder();
     private long references = -1;
@@ -55,6 +65,10 @@ final class NsoImportAudit {
         weakSlots.put(name, new WeakSlot(offset, original));
     }
 
+    void addBindingSlot(String name, long offset, int type, long addend, long original) {
+        bindingSlots.add(new BindingSlot(name, offset, type, addend, original));
+    }
+
     void noteExportScanFailure() {
         exportScanFailed = true;
     }
@@ -74,9 +88,11 @@ final class NsoImportAudit {
         tableRanges.append('\n');
     }
 
-    int compareExports(String module, ByteBuffer data, NsoRelocations.SymbolTable symbols)
-            throws InterruptedIOException {
-        Set<String> matches = new LinkedHashSet<>();
+    int compareExports(String module, ByteBuffer data, NsoRelocations.SymbolTable symbols,
+                       NsoHeader.Segment[] segments, long bssStart, long bssEnd) throws InterruptedIOException {
+        // Use disjoint 4 GiB ranges. The temporary main image uses range 1.
+        long base = (2L + scannedModules) << 32;
+        Map<String, Export> matches = new LinkedHashMap<>();
         for (long index = 1; index < symbols.count(); ++index) {
             if ((index & 0x3ff) == 1) {
                 checkInterrupted();
@@ -92,11 +108,23 @@ final class NsoImportAudit {
             }
             String name = exactName(data, symbols, entry);
             if (name != null && imports.containsKey(name)) {
-                matches.add(name);
+                int type = data.get(entry + 4) & 0xf;
+                long value = data.getLong(entry + 8);
+                boolean mapped = NsoDynamic.regionEnd(segments, value, 1) >= 0
+                        || (value >= bssStart && value < bssEnd);
+                if (type == STT_FUNC) {
+                    mapped = value >= segments[0].memoryOffset() && value < segments[0].memoryEnd()
+                            && (value & 3) == 0;
+                }
+                boolean supported = mapped && segments[0].memoryOffset() == 0 && type <= STT_FUNC
+                        && section < SHN_LORESERVE && (data.get(entry + 5) & 0xfc) == 0;
+                Export definition = new Export(module, supported ? base + value : -1, type);
+                matches.merge(name, definition, (first, second) -> first.equals(second)
+                        ? first : new Export(module, -1, -1));
             }
         }
-        for (String name : matches) {
-            candidates.computeIfAbsent(name, key -> new ArrayList<>()).add(module);
+        for (var entry : matches.entrySet()) {
+            candidates.computeIfAbsent(entry.getKey(), key -> new ArrayList<>()).add(entry.getValue());
         }
         ++scannedModules;
         return matches.size();
@@ -111,22 +139,24 @@ final class NsoImportAudit {
         int ambiguous = 0;
         int missing = 0;
         long named = 0;
+        long singleReferences = 0;
         StringBuilder missingExamples = new StringBuilder();
         StringBuilder ambiguousExamples = new StringBuilder();
         for (var entry : imports.entrySet()) {
             named += entry.getValue();
-            List<String> modules = candidates.get(entry.getKey());
+            List<Export> modules = candidates.get(entry.getKey());
             if (modules == null) {
                 if (++missing <= MAX_MISSING_NAMES) {
                     missingExamples.append("  ").append(entry.getKey()).append('\n');
                 }
             } else if (modules.size() == 1) {
                 ++single;
+                singleReferences += entry.getValue();
             } else if (++ambiguous <= MAX_AMBIGUOUS_NAMES) {
                 ambiguousExamples.append("  ").append(entry.getKey()).append(" → ")
-                        .append(modules.get(0));
+                        .append(modules.get(0).module());
                 for (int index = 1; index < modules.size(); ++index) {
-                    ambiguousExamples.append(", ").append(modules.get(index));
+                    ambiguousExamples.append(", ").append(modules.get(index).module());
                 }
                 ambiguousExamples.append('\n');
             }
@@ -148,12 +178,71 @@ final class NsoImportAudit {
             output.append("Contoh nama dengan beberapa kandidat (maks. ").append(MAX_AMBIGUOUS_NAMES).append(")\n")
                     .append(ambiguousExamples);
         }
+        if (singleReferences > 0 || !bindingSlots.isEmpty()) {
+            appendBindingTest(output, singleReferences);
+        }
         if (hasBoundaryEvidence()) {
             appendWeakTest(output, single, named);
             output.append("\nDetail simbol __rel_ di main\n").append(boundaryEvidence)
                     .append("Rentang tabel relokasi main (offset)\n").append(tableRanges);
         }
         return output.toString();
+    }
+
+    private void appendBindingTest(StringBuilder output, long singleReferences) {
+        output.append("\nSimulasi pengikatan impor main (salinan slot .data)\n");
+        if (exportScanFailed || scannedModules == 0) {
+            output.append("Uji dilewati. Pemindaian ekspor modul belum lengkap.\n");
+            return;
+        }
+
+        Map<Long, Integer> targetCounts = new LinkedHashMap<>();
+        for (BindingSlot slot : bindingSlots) {
+            targetCounts.merge(slot.offset(), 1, Integer::sum);
+        }
+        ByteBuffer copies = ByteBuffer.allocate(bindingSlots.size() * Long.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        int abs = 0;
+        int glob = 0;
+        int jump = 0;
+        StringBuilder examples = new StringBuilder();
+        for (BindingSlot slot : bindingSlots) {
+            List<Export> definitions = candidates.get(slot.name());
+            if (definitions == null || definitions.size() != 1 || targetCounts.get(slot.offset()) != 1) {
+                continue;
+            }
+            Export definition = definitions.get(0);
+            if (definition.address() < 0 || (slot.type() == AARCH64_JUMP_SLOT && definition.type() != STT_FUNC)) {
+                continue;
+            }
+            long address;
+            try {
+                address = Math.addExact(definition.address(), slot.addend());
+            } catch (ArithmeticException error) {
+                continue;
+            }
+            if (address < 0) {
+                continue;
+            }
+            int position = copies.position();
+            copies.putLong(slot.original());
+            copies.putLong(position, address);
+            if (abs + glob + jump < MAX_BINDING_SAMPLES) {
+                examples.append("  ").append(slot.name()).append(" → ").append(definition.module())
+                        .append(" @0x").append(Long.toHexString(slot.offset())).append(" = 0x")
+                        .append(Long.toHexString(copies.getLong(position))).append('\n');
+            }
+            switch (slot.type()) {
+                case AARCH64_ABS64 -> ++abs;
+                case AARCH64_GLOB_DAT -> ++glob;
+                case AARCH64_JUMP_SLOT -> ++jump;
+            }
+        }
+        int applied = abs + glob + jump;
+        output.append(applied).append(" dari ").append(singleReferences).append(" referensi kandidat tunggal diuji.\n")
+                .append("ABS64 ").append(abs).append(" | GLOB_DAT ").append(glob)
+                .append(" | JUMP_SLOT ").append(jump).append('\n')
+                .append("Referensi kandidat tunggal belum diuji  ").append(singleReferences - applied).append('\n')
+                .append(examples);
     }
 
     private void appendWeakTest(StringBuilder output, int single, long named) {

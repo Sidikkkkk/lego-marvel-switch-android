@@ -168,6 +168,7 @@ public final class NsoHeaderTest {
         testStartupStackFrame();
         testStartupUnalignedBssSlots();
         testStartupDoublewordImmediateStores();
+        testStartupRegisterBranchTable();
         System.out.println("NSO checks passed.");
     }
 
@@ -602,6 +603,39 @@ public final class NsoHeaderTest {
         rtld.putInt(0x10c, 0xf81f8fe2);
         require(startupReport(main, rtld).contains("STR X2, [SP, #-8]! — jejak berhenti, SP di luar stack simulasi atau tidak sejajar 16 byte."),
                 "A pre-index store cannot move SP to an unaligned address");
+    }
+
+    private static void testStartupRegisterBranchTable() throws IOException {
+        ByteBuffer main = relocationFixture().putLong(0x310, 0x21c0);
+        ByteBuffer rtld = relocationFixture().putInt(0x100, 0x14000002)
+                .putInt(0x108, 0xb0000018).putInt(0x10c, 0x91028718).putInt(0x110, 0xd28000e7)
+                .putInt(0x114, 0x10000009).putInt(0x118, 0x38676b0b)
+                .putInt(0x11c, 0x8b0b0929).putInt(0x120, 0xd61f0120)
+                .putInt(0x12c, 0xd2800844).put(0x1e8, (byte) 6);
+        String report = startupReport(main, rtld);
+        require(report.contains("LDRB W11, [X24, X7] @0x2000010a8 = 0x6")
+                && report.contains("ADD X9, X9, X11, LSL #2 = 0x20000002c")
+                && report.contains("BR X9 → 0x20000002c")
+                && report.contains("0x20000002c MOVZ X4 = 0x42"),
+                "A byte table entry selects an aligned instruction inside rtld");
+
+        rtld.put(0x1e8, (byte) 0xff);
+        report = startupReport(main, rtld);
+        require(report.contains("LDRB W11, [X24, X7] @0x2000010a8 = 0xff")
+                && report.contains("BR X9 → 0x200000410\nJejak berhenti. Target di luar .text rtld."),
+                "Byte loads zero-extend, and BR cannot jump outside its code segment");
+        rtld.put(0x1e8, (byte) 6).putInt(0x114, 0x30000009);
+        require(startupReport(main, rtld).contains("BR X9 → 0x20000002d\nJejak berhenti. Target tidak sejajar 4 byte."),
+                "An unaligned register branch cannot fetch instructions");
+        rtld.putInt(0x114, 0x10000009).putInt(0x120, 0xd61f00a0);
+        require(startupReport(main, rtld).contains("BR X5 — jejak berhenti, alamat cabang belum diketahui."),
+                "BR requires a known target register");
+        rtld.putInt(0x118, 0x38656b0b);
+        require(startupReport(main, rtld).contains("LDRB W11, [X24, X5] — jejak berhenti, register alamat belum diketahui."),
+                "A register-offset load requires a known index");
+        rtld.putInt(0x118, 0x38676b0b).putInt(0x10c, 0x9102e718);
+        require(startupReport(main, rtld).contains("LDRB W11, [X24, X7] @0x2000010c0 — jejak berhenti"),
+                "A register-offset byte load cannot read the gap past .rodata");
     }
 
     private static String startupReport(ByteBuffer main, ByteBuffer rtld) throws IOException {

@@ -75,7 +75,9 @@ final class NsoStartupProbe {
             int instruction = data.getInt((int) pc);
             int opcode = instruction & BRANCH_MASK;
             int opcodeWithoutSf = instruction & 0x7f80_0000;
+            int registerBranchOpcode = instruction & 0xffff_fc1f;
             boolean registerCompare = (instruction & 0xffe0_fc1f) == 0xeb00_001f;
+            boolean byteRegisterLoad = (instruction & 0xffe0_fc00) == 0x3860_6800;
             boolean unscaledLoad = (instruction & 0xbfe0_0c00) == 0xb840_0000;
             boolean postIndexedLoad = (instruction & 0xbfe0_0c00) == 0xb840_0400;
             boolean unsignedStore = (instruction & 0x7fc0_0000) == 0x3900_0000;
@@ -197,20 +199,31 @@ final class NsoStartupProbe {
                 long value = wide ? registers[source] : registers[source] & 0xffff_ffffL;
                 report.append("MOV ").append(zeroReg(destination, wide)).append(", ").append(zeroReg(source, wide));
                 writeRegister(report, registers, known, destination, value, known[source]);
-            } else if (unscaledLoad || postIndexedLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
+            } else if (byteRegisterLoad || unscaledLoad || postIndexedLoad || (instruction & 0xbfc0_0000) == 0xb940_0000) {
                 int source = (instruction >>> 5) & 31;
                 int destination = instruction & 31;
+                int offsetRegister = (instruction >>> 16) & 31;
                 boolean wide = (instruction & 0x4000_0000) != 0;
-                int size = wide ? Long.BYTES : Integer.BYTES;
-                boolean signedOffset = unscaledLoad || postIndexedLoad;
-                int byteOffset = signedOffset ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
-                report.append(unscaledLoad ? "LDUR " : "LDR ").append(zeroReg(destination, wide)).append(", [")
-                        .append(reg(source)).append(postIndexedLoad ? "], #" : ", #")
-                        .append(signedOffset ? Integer.toString(byteOffset) : "0x" + Integer.toHexString(byteOffset));
-                if (!postIndexedLoad) {
-                    report.append(']');
+                int size;
+                long byteOffset;
+                if (byteRegisterLoad) {
+                    size = Byte.BYTES;
+                    byteOffset = registers[offsetRegister];
+                    report.append("LDRB ").append(zeroReg(destination, false)).append(", [")
+                            .append(reg(source)).append(", ").append(zeroReg(offsetRegister, true)).append(']');
+                } else {
+                    size = wide ? Long.BYTES : Integer.BYTES;
+                    boolean signedOffset = unscaledLoad || postIndexedLoad;
+                    int immediate = signedOffset ? (instruction << 11) >> 23 : ((instruction >>> 10) & 0xfff) * size;
+                    byteOffset = immediate;
+                    report.append(unscaledLoad ? "LDUR " : "LDR ").append(zeroReg(destination, wide)).append(", [")
+                            .append(reg(source)).append(postIndexedLoad ? "], #" : ", #")
+                            .append(signedOffset ? Integer.toString(immediate) : "0x" + Integer.toHexString(immediate));
+                    if (!postIndexedLoad) {
+                        report.append(']');
+                    }
                 }
-                if (source != 31 && !known[source]) {
+                if ((source != 31 && !known[source]) || (byteRegisterLoad && !known[offsetRegister])) {
                     report.append(" — jejak berhenti, register alamat belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
@@ -243,7 +256,12 @@ final class NsoStartupProbe {
                 }
                 long value = 0;
                 if (!inStack) {
-                    value = wide ? data.getLong((int) offset) : data.getInt((int) offset) & 0xffff_ffffL;
+                    value = switch (size) {
+                        case Byte.BYTES -> Byte.toUnsignedLong(data.get((int) offset));
+                        case Integer.BYTES -> Integer.toUnsignedLong(data.getInt((int) offset));
+                        case Long.BYTES -> data.getLong((int) offset);
+                        default -> throw new IllegalArgumentException("Unsupported load size: " + size);
+                    };
                 }
                 boolean valueKnown = true;
                 for (int index = 0; index < size; ++index) {
@@ -387,13 +405,16 @@ final class NsoStartupProbe {
                 int destination = instruction & 31;
                 report.append("SXTW ").append(zeroReg(destination, true)).append(", ").append(zeroReg(source, false));
                 writeRegister(report, registers, known, destination, (int) registers[source], known[source]);
-            } else if ((instruction & 0x3fe0_fc00) == 0x0b00_0000) {
+            } else if ((instruction & 0x3fe0_fc00) == 0x0b00_0000
+                    || (instruction & 0xbfe0_0000) == 0x8b00_0000) {
                 int left = (instruction >>> 5) & 31;
                 int right = (instruction >>> 16) & 31;
                 int destination = instruction & 31;
                 boolean wide = instruction < 0;
                 boolean subtract = (instruction & 0x4000_0000) != 0;
-                long value = subtract ? registers[left] - registers[right] : registers[left] + registers[right];
+                int shift = (instruction >>> 10) & 63;
+                long rightValue = registers[right] << shift;
+                long value = subtract ? registers[left] - rightValue : registers[left] + rightValue;
                 if (!wide) {
                     value &= 0xffff_ffffL;
                 }
@@ -401,6 +422,9 @@ final class NsoStartupProbe {
                 report.append(subtract ? "SUB " : "ADD ")
                         .append(zeroReg(destination, wide)).append(", ").append(zeroReg(left, wide))
                         .append(", ").append(zeroReg(right, wide));
+                if (shift != 0) {
+                    report.append(", LSL #").append(shift);
+                }
                 writeRegister(report, registers, known, destination, value, valueKnown);
                 if (wide && destination != 31 && valueKnown && bssEnd > bssStart && value == base + bssStart) {
                     report.append(" (awal .bss rtld)");
@@ -450,11 +474,13 @@ final class NsoStartupProbe {
                 }
                 writeRegister(report, registers, known, destination, wide ? value : value & 0xffff_ffffL,
                         !keep || known[destination]);
-            } else if ((instruction & 0xffff_fc1f) == 0xd65f_0000) {
+            } else if (registerBranchOpcode == 0xd65f_0000 || registerBranchOpcode == 0xd61f_0000) {
+                boolean returning = registerBranchOpcode == 0xd65f_0000;
                 int source = (instruction >>> 5) & 31;
-                report.append("RET ").append(zeroReg(source, true));
+                report.append(returning ? "RET " : "BR ").append(zeroReg(source, true));
                 if (!known[source]) {
-                    report.append(" — jejak berhenti, alamat balik belum diketahui.\n");
+                    report.append(returning ? " — jejak berhenti, alamat balik belum diketahui.\n"
+                            : " — jejak berhenti, alamat cabang belum diketahui.\n");
                     appendWords(report, data, pc, lastInstruction, base);
                     return;
                 }
